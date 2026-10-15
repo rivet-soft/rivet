@@ -29,5 +29,17 @@ codesign --force --deep --sign - "$app"
 
 name="Rivet-$version-macos-universal"
 ditto -c -k --keepParent "$app" "$out/$name.zip"
-hdiutil create -volname "Rivet" -srcfolder "$app" -ov -format UDZO "$out/$name.dmg" >/dev/null
+# hdiutil's automatic sizing for -srcfolder occasionally comes out too small
+# ("No space left on device"); give it an explicit size with headroom and retry.
+size_mb=$(( $(du -sm "$app" | cut -f1) + 64 ))
+for attempt in 1 2 3; do
+  if hdiutil create -volname "Rivet" -srcfolder "$app" -size "${size_mb}m" \
+       -fs HFS+ -ov -format UDZO "$out/$name.dmg" >/dev/null; then
+    break
+  fi
+  [ "$attempt" = 3 ] && { echo "hdiutil failed" >&2; exit 1; }
+  echo "hdiutil failed (attempt $attempt), retrying…" >&2
+  size_mb=$(( size_mb * 2 ))
+  sleep 5
+done
 echo "macOS packages: $out/$name.dmg, $out/$name.zip"
