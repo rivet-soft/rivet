@@ -3,6 +3,8 @@
 //! entities (request editor, response view, env/history panels, palette).
 
 pub mod browser;
+#[cfg(windows)]
+mod browser_win;
 mod collection_dialog;
 pub mod collection_panel;
 pub mod env_panel;

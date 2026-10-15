@@ -1519,6 +1519,19 @@ impl ResponseView {
                 )
             })
             .child(div().flex_1())
+            .when(self.mode == BodyMode::Browser, |s| {
+                let pane = self.browser.clone();
+                s.child(
+                    Button::new("browser-open-external", "Открыть в браузере")
+                        .ghost()
+                        .icon(IconName::ExternalLink)
+                        .on_click(move |_, _, cx| {
+                            if let Err(e) = pane.open_external(cx) {
+                                eprintln!("rivet: open in browser failed: {e}");
+                            }
+                        }),
+                )
+            })
             .child(
                 div()
                     .id("content-type")

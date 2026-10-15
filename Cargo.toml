@@ -60,3 +60,9 @@ opt-level = 3
 # On Linux the Browser response mode needs WebKitGTK (wry's os-webview).
 [target.'cfg(target_os = "linux")'.dependencies]
 wry = { version = "0.57", default-features = false, features = ["devtools", "os-webview"] }
+
+# Windows: the Browser mode hosts WebView2 in an owned popup window, because
+# GPUI's DirectComposition layer is topmost over child windows.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader"] }
+raw-window-handle = "0.6"

@@ -101,7 +101,7 @@ impl Workspace {
 
         TitleBar::new()
             .h(px(super::TITLEBAR_HEIGHT))
-            .pl(px(if cfg!(target_os = "macos") { 88. } else { 0. }))
+            .pl(px(if cfg!(target_os = "macos") { 88. } else { 14. }))
             .bg(p.surface)
             .border_color(p.border)
             .child(
@@ -113,7 +113,9 @@ impl Workspace {
                     .pr(px(14.))
                     .child(project)
                     .child(
-                        div().w(px(420.)).child(
+                        // `occlude` keeps the titlebar's drag area from swallowing
+                        // clicks on Windows/Linux, where it is a native HTCAPTION.
+                        div().id("command-search-area").occlude().w(px(420.)).child(
                             SearchField::new("command-search", "Search or run command…")
                                 .kbd(shortcut_hint("⌘K", "Ctrl+K"))
                                 .on_click(
@@ -123,7 +125,7 @@ impl Workspace {
                                 ),
                         ),
                     )
-                    .child(env_switch),
+                    .child(div().id("env-switch-area").occlude().child(env_switch)),
             )
             .into_any_element()
     }

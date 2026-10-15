@@ -66,6 +66,10 @@ struct Inner {
     visible: bool,
     /// Times keyboard focus was handed back to the GPUI view (for tests/diagnostics).
     released: usize,
+    /// Windows: popup window hosting the webview (declared after `webview`
+    /// so the webview is dropped first).
+    #[cfg(windows)]
+    host: Option<super::browser_win::PopupHost>,
 }
 
 /// Owner of the native webview; cheap to clone (shared state).
@@ -95,6 +99,11 @@ impl BrowserPane {
                 let _ = w.set_visible(false);
                 let _ = w.focus_parent();
             }
+            #[cfg(windows)]
+            if let Some(host) = &inner.host {
+                host.hide();
+                host.focus_owner();
+            }
             inner.visible = false;
             inner.released += 1;
         }
@@ -108,7 +117,22 @@ impl BrowserPane {
         if let Some(w) = &inner.webview {
             let _ = w.focus_parent();
         }
+        #[cfg(windows)]
+        if let Some(host) = &inner.host {
+            host.focus_owner();
+        }
         inner.released += 1;
+    }
+
+    /// Opens the current document in the system browser (a temp `.html`
+    /// file; relative links still resolve through the injected `<base>`).
+    pub fn open_external(&self, cx: &mut App) -> Result<(), String> {
+        let document = self.0.borrow().document.clone();
+        let path = std::env::temp_dir().join(format!("rivet-preview-{}.html", std::process::id()));
+        std::fs::write(&path, document).map_err(|e| e.to_string())?;
+        let url = url::Url::from_file_path(&path).map_err(|_| "invalid temp path".to_string())?;
+        cx.open_url(url.as_str());
+        Ok(())
     }
 
     pub fn keyboard_releases(&self) -> usize {
@@ -118,6 +142,12 @@ impl BrowserPane {
     /// Creates the webview on first use, loads the current document and
     /// places it over `bounds` (window coordinates, logical pixels).
     fn show_at(&self, bounds: Bounds<Pixels>, window: &mut Window) {
+        #[cfg(windows)]
+        {
+            self.show_at_windows(bounds, window);
+            return;
+        }
+        #[allow(unreachable_code)]
         let mut inner = self.0.borrow_mut();
         let rect = wry::Rect {
             position: LogicalPosition::new(
@@ -164,6 +194,59 @@ impl BrowserPane {
         if reload {
             inner.loaded = Some(inner.document.clone());
         }
+    }
+
+    /// Windows: the webview fills an owned popup placed over `bounds`.
+    #[cfg(windows)]
+    fn show_at_windows(&self, bounds: Bounds<Pixels>, window: &mut Window) {
+        use wry::dpi::{PhysicalPosition, PhysicalSize};
+        let mut inner = self.0.borrow_mut();
+        let scale = window.scale_factor();
+        let px = |v: Pixels| (f32::from(v) * scale).round() as i32;
+        let (x, y, w, h) = (px(bounds.origin.x), px(bounds.origin.y), px(bounds.size.width), px(bounds.size.height));
+        let rect = wry::Rect {
+            position: PhysicalPosition::new(0, 0).into(),
+            size: PhysicalSize::new(w.max(1) as u32, h.max(1) as u32).into(),
+        };
+        if inner.host.is_none() && inner.error.is_none() {
+            match super::browser_win::owner_hwnd(&*window).and_then(super::browser_win::PopupHost::new) {
+                Some(host) => inner.host = Some(host),
+                None => {
+                    inner.error = Some("не удалось создать окно для WebView2".into());
+                    return;
+                }
+            }
+        }
+        let Some(host) = inner.host.as_ref() else { return };
+        host.place(x, y, w, h);
+        if inner.webview.is_none() && inner.error.is_none() {
+            let built = wry::WebViewBuilder::new()
+                .with_bounds(rect)
+                .with_html(inner.document.clone())
+                .with_devtools(true)
+                .build_as_child(host);
+            match built {
+                Ok(webview) => {
+                    host.focus_owner();
+                    inner.webview = Some(webview);
+                    inner.loaded = Some(inner.document.clone());
+                    inner.visible = true;
+                }
+                Err(e) => inner.error = Some(e.to_string()),
+            }
+            return;
+        }
+        let Some(webview) = &inner.webview else { return };
+        let _ = webview.set_bounds(rect);
+        let _ = webview.set_visible(true);
+        let reload = inner.loaded.as_deref() != Some(inner.document.as_str());
+        if reload {
+            let _ = webview.load_html(&inner.document);
+            host.focus_owner();
+            let document = inner.document.clone();
+            inner.loaded = Some(document);
+        }
+        inner.visible = true;
     }
 
     /// Placeholder element whose painted bounds drive the native view.
