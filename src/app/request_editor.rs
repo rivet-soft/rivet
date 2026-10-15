@@ -1,0 +1,1878 @@
+//! Request editor (PLAN.md, `app::request_editor`): Params / Headers / Auth above
+//! an always-visible Body pane. Every edit is written straight into the
+//! spec and announced with [`RequestEditorEvent::Changed`].
+//!
+//! Key-value tables are Postman style: the last row is always an empty draft;
+//! typing into it turns it into a real row and appends a fresh draft.
+
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui_kit::component::input::{
+    Editor, EditorState, Input, InputEvent, InputState, RangeDecoration, RangeDecorationCollection,
+    RangeDecorationStyle, TextDecoration, TextDecorationCollection,
+};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+
+use crate::core::openapi::GeneratedRequestBody;
+use crate::core::types::{Auth, BodyKind, KeyValue, RequestSpec};
+use crate::theme::{ActivePalette, MONO};
+use crate::ui::{
+    BodyModePicker, Button, FormFieldTypePicker, HorizontalPaneSplitter, IconButton, IconName,
+    PANE_SPLITTER_HEIGHT, Pill, Popover, RequestRedirectSettings, Segmented, icon, tokenize_vars,
+    var_content, var_token_element,
+};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RequestEditorEvent {
+    /// The spec was edited; read it with [`RequestEditor::spec`].
+    Changed,
+    /// "✦ Generate from schema" was clicked; answer with [`RequestEditor::set_generated_body`].
+    GenerateBody,
+    /// The panel's "Save" button was clicked.
+    Save,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RequestEditorTab {
+    #[default]
+    Params,
+    Headers,
+    Body,
+    Auth,
+    Settings,
+    /// Declared last so the existing `("subtab", n)` ids keep their numbers;
+    /// shown right after Auth.
+    Scripts,
+}
+
+impl RequestEditorTab {
+    pub const ALL: [RequestEditorTab; 6] = [
+        Self::Params,
+        Self::Headers,
+        Self::Body,
+        Self::Auth,
+        Self::Scripts,
+        Self::Settings,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Params => "Params",
+            Self::Headers => "Headers",
+            Self::Body => "Body",
+            Self::Auth => "Auth",
+            Self::Settings => "Settings",
+            Self::Scripts => "Scripts",
+        }
+    }
+}
+
+/// Which script the Scripts tab edits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScriptStage {
+    #[default]
+    PreRequest,
+    PostResponse,
+}
+
+impl ScriptStage {
+    pub const ALL: [ScriptStage; 2] = [Self::PreRequest, Self::PostResponse];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::PreRequest => "Pre-request",
+            Self::PostResponse => "Post-response",
+        }
+    }
+
+    /// Snippets offered for this stage: `(title, code)`.
+    pub fn snippets(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::PreRequest => PRE_REQUEST_SNIPPETS,
+            Self::PostResponse => POST_RESPONSE_SNIPPETS,
+        }
+    }
+
+    fn script(self, spec: &RequestSpec) -> &str {
+        match self {
+            Self::PreRequest => &spec.scripts.pre_request,
+            Self::PostResponse => &spec.scripts.post_response,
+        }
+    }
+
+    fn script_mut(self, spec: &mut RequestSpec) -> &mut String {
+        match self {
+            Self::PreRequest => &mut spec.scripts.pre_request,
+            Self::PostResponse => &mut spec.scripts.post_response,
+        }
+    }
+}
+
+const PRE_REQUEST_SNIPPETS: &[(&str, &str)] = &[
+    (
+        "Задать переменную",
+        "pm.environment.set(\"timestamp\", Date.now().toString());",
+    ),
+    (
+        "Добавить заголовок",
+        "pm.request.headers.upsert({ key: \"X-Request-Id\", value: pm.variables.replaceIn(\"{{$uuid}}\") });",
+    ),
+    ("Лог запроса", "console.log(pm.request.url.toString());"),
+];
+
+const POST_RESPONSE_SNIPPETS: &[(&str, &str)] = &[
+    (
+        "Сохранить поле ответа в окружение",
+        "const json = pm.response.json();\npm.environment.set(\"token\", json.token);",
+    ),
+    (
+        "Статус 200",
+        "pm.test(\"Status is 200\", () => {\n  pm.response.to.have.status(200);\n});",
+    ),
+    (
+        "Время ответа < 500 мс",
+        "pm.test(\"Response time < 500ms\", () => {\n  pm.expect(pm.response.responseTime).to.be.below(500);\n});",
+    ),
+    (
+        "Поле есть в ответе",
+        "pm.test(\"Has id\", () => {\n  pm.expect(pm.response.json()).to.have.property(\"id\");\n});",
+    ),
+    ("Лог ответа", "console.log(pm.response.json());"),
+];
+
+/// Auth type picker entries, in menu order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthKind {
+    Inherit,
+    Bearer,
+    Basic,
+    ApiKey,
+    None,
+}
+
+impl AuthKind {
+    pub const ALL: [AuthKind; 5] = [
+        Self::Inherit,
+        Self::Bearer,
+        Self::Basic,
+        Self::ApiKey,
+        Self::None,
+    ];
+
+    fn of(auth: &Auth) -> Self {
+        match auth {
+            Auth::None => Self::None,
+            Auth::Inherit => Self::Inherit,
+            Auth::Bearer { .. } => Self::Bearer,
+            Auth::Basic { .. } => Self::Basic,
+            Auth::ApiKey { .. } => Self::ApiKey,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Inherit => "Inherit from spec",
+            Self::Bearer => "Bearer Token",
+            Self::Basic => "Basic Auth",
+            Self::ApiKey => "API Key",
+            Self::None => "No auth",
+        }
+    }
+}
+
+const BODY_KINDS: [BodyKind; 6] = [
+    BodyKind::None,
+    BodyKind::Multipart,
+    BodyKind::Form,
+    BodyKind::Json,
+    BodyKind::Text,
+    BodyKind::Binary,
+];
+const MIN_DETAILS_HEIGHT: f32 = 140.;
+const MIN_BODY_HEIGHT: f32 = 170.;
+
+fn details_height(available: f32, ratio: f32) -> f32 {
+    let usable = (available - PANE_SPLITTER_HEIGHT).max(0.);
+    let details_min = MIN_DETAILS_HEIGHT.min(usable / 2.);
+    let body_min = MIN_BODY_HEIGHT.min(usable / 2.);
+    (usable * ratio).clamp(details_min, usable - body_min)
+}
+
+/// Which key-value list of the spec a table edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KvTarget {
+    Params,
+    Headers,
+    Form,
+}
+
+impl KvTarget {
+    fn scope(self) -> &'static str {
+        match self {
+            Self::Params => "req-params",
+            Self::Headers => "req-headers",
+            Self::Form => "req-form",
+        }
+    }
+
+    fn list(self, spec: &RequestSpec) -> &Vec<KeyValue> {
+        match self {
+            Self::Params => &spec.params,
+            Self::Headers => &spec.headers,
+            Self::Form => &spec.body.form,
+        }
+    }
+
+    fn list_mut(self, spec: &mut RequestSpec) -> &mut Vec<KeyValue> {
+        match self {
+            Self::Params => &mut spec.params,
+            Self::Headers => &mut spec.headers,
+            Self::Form => &mut spec.body.form,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Field {
+    Key,
+    Value,
+    Description,
+}
+
+#[derive(Clone, Copy)]
+enum FileTarget {
+    NewFormField,
+    FormField(u64),
+    BinaryBody,
+}
+
+/// Editors of one table row. Dropping it drops its subscriptions.
+struct RowInputs {
+    id: u64,
+    key: Entity<InputState>,
+    value: Entity<InputState>,
+    description: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// `eyJh••••3fQ`: enough to recognise a secret without showing it.
+pub fn mask_secret(secret: &str) -> String {
+    let chars: Vec<char> = secret.chars().collect();
+    if chars.is_empty() {
+        String::new()
+    } else if chars.len() <= 8 {
+        "••••••••".into()
+    } else {
+        let head: String = chars[..4].iter().collect();
+        let tail: String = chars[chars.len() - 3..].iter().collect();
+        format!("{head}••••{tail}")
+    }
+}
+
+/// Pretty-prints JSON with 2-space indentation, keeping key order.
+pub fn beautify_json(text: &str) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+}
+
+pub struct RequestEditor {
+    spec: RequestSpec,
+    tab: RequestEditorTab,
+    split_ratio: f32,
+    split_dragging: bool,
+    split_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    params: Vec<RowInputs>,
+    headers: Vec<RowInputs>,
+    form: Vec<RowInputs>,
+    next_row_id: u64,
+    body_editor: Entity<EditorState>,
+    body_error: Option<String>,
+    /// `{{var}}` highlighting in the body editor: text colour + tinted fill,
+    /// and the theme mode they were painted for.
+    body_vars: Option<(
+        TextDecorationCollection,
+        RangeDecorationCollection,
+        crate::theme::Mode,
+    )>,
+    auth_kind: AuthKind,
+    auth_menu_open: bool,
+    token_revealed: bool,
+    api_in_query: bool,
+    token: Entity<InputState>,
+    username: Entity<InputState>,
+    password: Entity<InputState>,
+    api_key: Entity<InputState>,
+    api_value: Entity<InputState>,
+    redirect_limit: Entity<InputState>,
+    redirect_defaults: (bool, u32),
+    script_stage: ScriptStage,
+    /// One JS editor per stage, so each keeps its own cursor and undo history.
+    pre_script: Entity<EditorState>,
+    post_script: Entity<EditorState>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl EventEmitter<RequestEditorEvent> for RequestEditor {}
+
+impl RequestEditor {
+    pub fn new(spec: RequestSpec, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let body_editor = cx.new(|cx| EditorState::new(window, cx).language("json"));
+        let token = cx.new(|cx| InputState::new(window, cx).placeholder("{{token}}"));
+        let username = cx.new(|cx| InputState::new(window, cx).placeholder("Username"));
+        let password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Password")
+                .masked(true)
+        });
+        let api_key = cx.new(|cx| InputState::new(window, cx).placeholder("X-API-Key"));
+        let api_value = cx.new(|cx| InputState::new(window, cx).placeholder("Value"));
+        let redirect_limit = cx.new(|cx| InputState::new(window, cx).placeholder("По умолчанию"));
+        let pre_script = cx.new(|cx| EditorState::new(window, cx).language("javascript"));
+        let post_script = cx.new(|cx| EditorState::new(window, cx).language("javascript"));
+
+        let mut subscriptions = vec![cx.subscribe_in(
+            &body_editor,
+            window,
+            |this, state, ev: &InputEvent, _, cx| {
+                if let InputEvent::Change = ev {
+                    this.spec.body.text = state.read(cx).value().to_string();
+                    this.highlight_body_vars(cx);
+                    this.body_error = None;
+                    cx.emit(RequestEditorEvent::Changed);
+                    cx.notify();
+                }
+            },
+        )];
+        for (state, tokens) in [
+            (&token, true),
+            (&username, true),
+            (&password, false),
+            (&api_key, false),
+            (&api_value, true),
+        ] {
+            subscriptions.push(cx.subscribe_in(
+                state,
+                window,
+                move |this, state, ev: &InputEvent, window, cx| {
+                    if let InputEvent::Change = ev {
+                        if tokens {
+                            state.update(cx, |s, cx| tokenize_vars(s, window, cx));
+                        }
+                        this.sync_auth(cx);
+                    }
+                },
+            ));
+        }
+        subscriptions.push(cx.subscribe_in(
+            &redirect_limit,
+            window,
+            |this, state, ev: &InputEvent, _, cx| {
+                if let InputEvent::Change = ev {
+                    let value = state.read(cx).value().trim().to_string();
+                    let parsed = if value.is_empty() {
+                        Some(None)
+                    } else {
+                        value
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|v| (1..=50).contains(v))
+                            .map(Some)
+                    };
+                    if let Some(limit) = parsed {
+                        this.spec.max_redirects = limit;
+                        cx.emit(RequestEditorEvent::Changed);
+                        cx.notify();
+                    }
+                }
+            },
+        ));
+        for (state, stage) in [
+            (&pre_script, ScriptStage::PreRequest),
+            (&post_script, ScriptStage::PostResponse),
+        ] {
+            subscriptions.push(cx.subscribe_in(
+                state,
+                window,
+                move |this, state, ev: &InputEvent, _, cx| {
+                    if let InputEvent::Change = ev {
+                        let text = state.read(cx).value().to_string();
+                        let slot = stage.script_mut(&mut this.spec);
+                        if *slot != text {
+                            *slot = text;
+                            cx.emit(RequestEditorEvent::Changed);
+                        }
+                        cx.notify();
+                    }
+                },
+            ));
+        }
+
+        let mut this = Self {
+            spec: spec.clone(),
+            tab: RequestEditorTab::default(),
+            split_ratio: 0.48,
+            split_dragging: false,
+            split_bounds: Rc::new(Cell::new(None)),
+            params: Vec::new(),
+            headers: Vec::new(),
+            form: Vec::new(),
+            next_row_id: 0,
+            body_editor,
+            body_error: None,
+            body_vars: None,
+            auth_kind: AuthKind::None,
+            auth_menu_open: false,
+            token_revealed: false,
+            api_in_query: false,
+            token,
+            username,
+            password,
+            api_key,
+            api_value,
+            redirect_limit,
+            redirect_defaults: (true, 10),
+            script_stage: ScriptStage::default(),
+            pre_script,
+            post_script,
+            _subscriptions: subscriptions,
+        };
+        this.set_spec(spec, window, cx);
+        this
+    }
+
+    pub fn spec(&self) -> &RequestSpec {
+        &self.spec
+    }
+
+    /// Loads another request, rebuilding every editor. Emits nothing.
+    pub fn set_spec(&mut self, spec: RequestSpec, window: &mut Window, cx: &mut Context<Self>) {
+        self.spec = spec;
+        self.body_error = None;
+        self.auth_menu_open = false;
+        for target in [KvTarget::Params, KvTarget::Headers, KvTarget::Form] {
+            let rows: Vec<RowInputs> = target
+                .list(&self.spec)
+                .clone()
+                .iter()
+                .map(Some)
+                .chain([None])
+                .map(|kv| self.make_row(target, kv, window, cx))
+                .collect();
+            *self.rows_mut(target) = rows;
+        }
+
+        let text = self.spec.body.text.clone();
+        self.body_editor
+            .update(cx, |s, cx| s.set_value(text, window, cx));
+        self.highlight_body_vars(cx);
+
+        for stage in ScriptStage::ALL {
+            let text = stage.script(&self.spec).to_string();
+            self.script_editor(stage)
+                .clone()
+                .update(cx, |s, cx| s.set_value(text, window, cx));
+        }
+
+        self.auth_kind = AuthKind::of(&self.spec.auth);
+        // An empty token starts editable; a stored one starts masked.
+        self.token_revealed = matches!(&self.spec.auth, Auth::Bearer { token } if token.is_empty())
+            || !matches!(self.spec.auth, Auth::Bearer { .. });
+        let (token, user, pass, key, value, in_query) = match &self.spec.auth {
+            Auth::Bearer { token } => (token.as_str(), "", "", "", "", false),
+            Auth::Basic { username, password } => {
+                ("", username.as_str(), password.as_str(), "", "", false)
+            }
+            Auth::ApiKey {
+                key,
+                value,
+                in_query,
+            } => ("", "", "", key.as_str(), value.as_str(), *in_query),
+            Auth::None | Auth::Inherit => ("", "", "", "", "", false),
+        };
+        self.api_in_query = in_query;
+        self.redirect_limit.update(cx, |s, cx| {
+            s.set_value(
+                self.spec
+                    .max_redirects
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                window,
+                cx,
+            )
+        });
+        for (state, text, tokens) in [
+            (&self.token, token, true),
+            (&self.username, user, true),
+            (&self.password, pass, false),
+            (&self.api_key, key, false),
+            (&self.api_value, value, true),
+        ] {
+            let content = if tokens {
+                var_content(text)
+            } else {
+                text.to_string().into()
+            };
+            state.update(cx, |s, cx| s.set_value(content, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Replaces raw body text. An empty body mode switches to JSON so the text
+    /// is visible. Emits `Changed`.
+    pub fn set_body_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.spec.body.kind, BodyKind::Json | BodyKind::Text) {
+            self.spec.body.kind = BodyKind::Json;
+        }
+        self.body_editor
+            .update(cx, |s, cx| s.set_value(text.clone(), window, cx));
+        self.spec.body.text = text;
+        self.highlight_body_vars(cx);
+        self.body_error = None;
+        cx.emit(RequestEditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Apply the media type and example generated from the linked operation.
+    pub fn set_generated_body(
+        &mut self,
+        generated: GeneratedRequestBody,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.spec.body = generated.body;
+        self.spec
+            .headers
+            .retain(|header| !header.key.eq_ignore_ascii_case("content-type"));
+        if let Some(content_type) = generated.content_type {
+            self.spec
+                .headers
+                .push(KeyValue::new("Content-Type", content_type));
+        }
+        self.set_spec(self.spec.clone(), window, cx);
+        cx.emit(RequestEditorEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn active_tab(&self) -> RequestEditorTab {
+        self.tab
+    }
+
+    pub fn script_stage(&self) -> ScriptStage {
+        self.script_stage
+    }
+
+    pub fn set_script_stage(&mut self, stage: ScriptStage, cx: &mut Context<Self>) {
+        self.script_stage = stage;
+        cx.notify();
+    }
+
+    /// True when either script has content: the Scripts tab shows a dot.
+    pub fn has_scripts(&self) -> bool {
+        !self.spec.scripts.is_empty()
+    }
+
+    fn script_editor(&self, stage: ScriptStage) -> &Entity<EditorState> {
+        match stage {
+            ScriptStage::PreRequest => &self.pre_script,
+            ScriptStage::PostResponse => &self.post_script,
+        }
+    }
+
+    /// Appends snippet `ix` of the current stage to its script (on a new line).
+    /// Emits `Changed`.
+    pub fn insert_snippet(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let stage = self.script_stage;
+        let Some((_, code)) = stage.snippets().get(ix) else {
+            return;
+        };
+        let current = stage.script(&self.spec);
+        let text = if current.trim().is_empty() {
+            code.to_string()
+        } else if current.ends_with('\n') {
+            format!("{current}{code}")
+        } else {
+            format!("{current}\n{code}")
+        };
+        self.script_editor(stage)
+            .clone()
+            .update(cx, |s, cx| s.set_value(text.clone(), window, cx));
+        *stage.script_mut(&mut self.spec) = text;
+        cx.emit(RequestEditorEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn set_redirect_defaults(&mut self, follow: bool, max: u32, cx: &mut Context<Self>) {
+        self.redirect_defaults = (follow, max);
+        cx.notify();
+    }
+
+    fn set_follow_redirects(&mut self, follow: Option<bool>, cx: &mut Context<Self>) {
+        if self.spec.follow_redirects != follow {
+            self.spec.follow_redirects = follow;
+            cx.emit(RequestEditorEvent::Changed);
+        }
+        cx.notify();
+    }
+
+    pub fn set_tab(&mut self, tab: RequestEditorTab, cx: &mut Context<Self>) {
+        if tab == RequestEditorTab::Body {
+            return;
+        }
+        self.tab = tab;
+        self.auth_menu_open = false;
+        cx.notify();
+    }
+
+    /// Inline Beautify error ("Невалидный JSON: …"), if the last attempt failed.
+    pub fn body_error(&self) -> Option<&str> {
+        self.body_error.as_deref()
+    }
+
+    pub fn token_revealed(&self) -> bool {
+        self.token_revealed
+    }
+
+    /// Enabled rows with a non-empty key: the number shown next to a tab label.
+    pub fn count(&self, tab: RequestEditorTab) -> usize {
+        let list = match tab {
+            RequestEditorTab::Params => &self.spec.params,
+            RequestEditorTab::Headers => &self.spec.headers,
+            _ => return 0,
+        };
+        list.iter()
+            .filter(|kv| kv.enabled && !kv.key.trim().is_empty())
+            .count()
+    }
+
+    pub fn set_body_kind(&mut self, kind: BodyKind, cx: &mut Context<Self>) {
+        if self.spec.body.kind != kind {
+            self.spec.body.kind = kind;
+            self.body_error = None;
+            cx.emit(RequestEditorEvent::Changed);
+        }
+        cx.notify();
+    }
+
+    /// Byte ranges of `{{var}}` currently highlighted in the body editor.
+    pub fn body_var_ranges(&self, cx: &App) -> Vec<std::ops::Range<usize>> {
+        self.body_vars
+            .as_ref()
+            .map(|(text, _, _)| text.get_ranges(cx))
+            .unwrap_or_default()
+    }
+
+    /// Re-marks every `{{var}}` in the body, like the inline tokens in the URL
+    /// field. The body stays plain text (a JSON editor can't hold atomic tokens).
+    fn highlight_body_vars(&mut self, cx: &mut Context<Self>) {
+        let p = *cx.palette();
+        let ranges = crate::ui::var_ranges(&self.spec.body.text);
+        let text_decorations: Vec<_> = ranges
+            .iter()
+            .map(|r| {
+                TextDecoration::new(
+                    r.clone(),
+                    HighlightStyle {
+                        color: Some(p.accent_hi),
+                        font_weight: Some(FontWeight::MEDIUM),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let fills: Vec<_> = ranges
+            .into_iter()
+            .map(|r| {
+                RangeDecoration::new(r)
+                    .with_style(RangeDecorationStyle::Fill)
+                    .with_color(p.accent.opacity(0.18))
+            })
+            .collect();
+        match &mut self.body_vars {
+            Some((text, fill, mode)) => {
+                text.set(text_decorations, cx);
+                fill.set(fills, cx);
+                *mode = p.mode;
+            }
+            None => {
+                let (text, fill) = self.body_editor.update(cx, |s, cx| {
+                    (
+                        s.create_decorations_collection(text_decorations, cx),
+                        s.create_range_decorations_collection(fills, cx),
+                    )
+                });
+                self.body_vars = Some((text, fill, p.mode));
+            }
+        }
+    }
+
+    /// Reformats a JSON body; on a parse error shows it inline and leaves the text.
+    pub fn beautify(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match beautify_json(&self.spec.body.text) {
+            Ok(pretty) => {
+                self.body_error = None;
+                if pretty != self.spec.body.text {
+                    self.body_editor
+                        .update(cx, |s, cx| s.set_value(pretty.clone(), window, cx));
+                    self.spec.body.text = pretty;
+                    self.highlight_body_vars(cx);
+                    cx.emit(RequestEditorEvent::Changed);
+                }
+            }
+            Err(e) => self.body_error = Some(format!("Невалидный JSON: {e}")),
+        }
+        cx.notify();
+    }
+
+    pub fn set_auth_kind(&mut self, kind: AuthKind, cx: &mut Context<Self>) {
+        if kind == AuthKind::Bearer
+            && self.auth_kind != kind
+            && self.token.read(cx).value().is_empty()
+        {
+            self.token_revealed = true;
+        }
+        self.auth_kind = kind;
+        self.auth_menu_open = false;
+        self.sync_auth(cx);
+    }
+
+    pub fn set_api_key_in_query(&mut self, in_query: bool, cx: &mut Context<Self>) {
+        self.api_in_query = in_query;
+        self.sync_auth(cx);
+    }
+
+    pub fn toggle_token_revealed(&mut self, cx: &mut Context<Self>) {
+        self.token_revealed = !self.token_revealed;
+        cx.notify();
+    }
+
+    /// Rebuilds `spec.auth` from the picked type and the auth inputs.
+    fn sync_auth(&mut self, cx: &mut Context<Self>) {
+        let v = |s: &Entity<InputState>, cx: &Context<Self>| s.read(cx).value().to_string();
+        let auth = match self.auth_kind {
+            AuthKind::None => Auth::None,
+            AuthKind::Inherit => Auth::Inherit,
+            AuthKind::Bearer => Auth::Bearer {
+                token: v(&self.token, cx),
+            },
+            AuthKind::Basic => Auth::Basic {
+                username: v(&self.username, cx),
+                password: v(&self.password, cx),
+            },
+            AuthKind::ApiKey => Auth::ApiKey {
+                key: v(&self.api_key, cx),
+                value: v(&self.api_value, cx),
+                in_query: self.api_in_query,
+            },
+        };
+        if auth != self.spec.auth {
+            self.spec.auth = auth;
+            cx.emit(RequestEditorEvent::Changed);
+        }
+        cx.notify();
+    }
+
+    fn rows(&self, target: KvTarget) -> &Vec<RowInputs> {
+        match target {
+            KvTarget::Params => &self.params,
+            KvTarget::Headers => &self.headers,
+            KvTarget::Form => &self.form,
+        }
+    }
+
+    fn rows_mut(&mut self, target: KvTarget) -> &mut Vec<RowInputs> {
+        match target {
+            KvTarget::Params => &mut self.params,
+            KvTarget::Headers => &mut self.headers,
+            KvTarget::Form => &mut self.form,
+        }
+    }
+
+    fn make_row(
+        &mut self,
+        target: KvTarget,
+        kv: Option<&KeyValue>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> RowInputs {
+        let id = self.next_row_id;
+        self.next_row_id += 1;
+        let placeholder = match target {
+            KvTarget::Headers => "Header",
+            KvTarget::Params => "Param",
+            KvTarget::Form => "Field",
+        };
+        let key = cx.new(|cx| {
+            let mut s = InputState::new(window, cx).placeholder(placeholder);
+            if let Some(kv) = kv {
+                s.set_value(kv.key.clone(), window, cx);
+            }
+            s
+        });
+        let value = cx.new(|cx| {
+            let placeholder = if target == KvTarget::Form && kv.is_some_and(|field| field.file) {
+                "Путь к файлу"
+            } else {
+                "Value"
+            };
+            let mut s = InputState::new(window, cx).placeholder(placeholder);
+            if let Some(kv) = kv {
+                s.set_value(var_content(&kv.value), window, cx);
+            }
+            s
+        });
+        let description = cx.new(|cx| {
+            let mut s = InputState::new(window, cx).placeholder("Description");
+            if let Some(kv) = kv {
+                s.set_value(kv.description.clone(), window, cx);
+            }
+            s
+        });
+        let subscriptions = [
+            (&key, Field::Key),
+            (&value, Field::Value),
+            (&description, Field::Description),
+        ]
+        .into_iter()
+        .map(|(state, field)| {
+            cx.subscribe_in(
+                state,
+                window,
+                move |this, state, ev: &InputEvent, window, cx| {
+                    if let InputEvent::Change = ev {
+                        this.on_cell_change(target, id, field, state, window, cx);
+                    }
+                },
+            )
+        })
+        .collect();
+        RowInputs {
+            id,
+            key,
+            value,
+            description,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    fn on_cell_change(
+        &mut self,
+        target: KvTarget,
+        row_id: u64,
+        field: Field,
+        state: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if field == Field::Value {
+            state.update(cx, |s, cx| tokenize_vars(s, window, cx));
+        }
+        let text = state.read(cx).value().to_string();
+        let Some(pos) = self.rows(target).iter().position(|r| r.id == row_id) else {
+            return;
+        };
+        let len = target.list(&self.spec).len();
+        if pos >= len {
+            // The draft row: becomes real once it has content.
+            if text.is_empty() {
+                return;
+            }
+            target.list_mut(&mut self.spec).push(KeyValue::new("", ""));
+            let draft = self.make_row(target, None, window, cx);
+            self.rows_mut(target).push(draft);
+        }
+        let kv = &mut target.list_mut(&mut self.spec)[pos];
+        let slot = match field {
+            Field::Key => &mut kv.key,
+            Field::Value => &mut kv.value,
+            Field::Description => &mut kv.description,
+        };
+        if *slot != text {
+            *slot = text;
+            cx.emit(RequestEditorEvent::Changed);
+        }
+        cx.notify();
+    }
+
+    fn toggle_row(&mut self, target: KvTarget, ix: usize, cx: &mut Context<Self>) {
+        if let Some(kv) = target.list_mut(&mut self.spec).get_mut(ix) {
+            kv.enabled = !kv.enabled;
+            cx.emit(RequestEditorEvent::Changed);
+            cx.notify();
+        }
+    }
+
+    fn delete_row(&mut self, target: KvTarget, ix: usize, cx: &mut Context<Self>) {
+        if ix < target.list(&self.spec).len() {
+            target.list_mut(&mut self.spec).remove(ix);
+            self.rows_mut(target).remove(ix);
+            cx.emit(RequestEditorEvent::Changed);
+            cx.notify();
+        }
+    }
+
+    fn set_form_field_type(&mut self, ix: usize, file: bool, cx: &mut Context<Self>) {
+        if let Some(field) = self.spec.body.form.get_mut(ix) {
+            if field.file != file {
+                field.file = file;
+                cx.emit(RequestEditorEvent::Changed);
+                cx.notify();
+            }
+        } else if file {
+            // The draft row becomes a file field only after a file is selected.
+            self.pick_file(FileTarget::NewFormField, cx);
+        }
+    }
+
+    fn pick_file(&mut self, target: FileTarget, cx: &mut Context<Self>) {
+        let request_id = self.spec.id.clone();
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Выберите файл для тела запроса".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = paths.await {
+                if let Some(path) = paths.into_iter().next() {
+                    this.update_in(cx, |this, window, cx| {
+                        if this.spec.id != request_id {
+                            return;
+                        }
+                        let path_text = path.display().to_string();
+                        match target {
+                            FileTarget::NewFormField
+                                if this.spec.body.kind == BodyKind::Multipart =>
+                            {
+                                let mut field = KeyValue::new("file", path_text);
+                                field.file = true;
+                                let row = this.make_row(KvTarget::Form, Some(&field), window, cx);
+                                this.spec.body.form.push(field);
+                                let draft = this.form.len().saturating_sub(1);
+                                this.form.insert(draft, row);
+                            }
+                            FileTarget::FormField(row_id)
+                                if this.spec.body.kind == BodyKind::Multipart =>
+                            {
+                                let Some(ix) = this.form.iter().position(|row| row.id == row_id)
+                                else {
+                                    return;
+                                };
+                                let Some(field) = this.spec.body.form.get_mut(ix) else {
+                                    return;
+                                };
+                                field.file = true;
+                                field.value = path_text.clone();
+                                this.form[ix]
+                                    .value
+                                    .update(cx, |state, cx| state.set_value(path_text, window, cx));
+                            }
+                            FileTarget::BinaryBody if this.spec.body.kind == BodyKind::Binary => {
+                                this.spec.body.file_path = Some(path);
+                            }
+                            _ => return,
+                        }
+                        cx.emit(RequestEditorEvent::Changed);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
+    }
+
+    // ----- rendering -----
+
+    fn move_split(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !self.split_dragging {
+            return;
+        }
+        if event.pressed_button.is_none() {
+            self.stop_split(cx);
+            return;
+        }
+        let Some(bounds) = self.split_bounds.get() else {
+            return;
+        };
+        let available = bounds.size.height.as_f32();
+        let usable = available - PANE_SPLITTER_HEIGHT;
+        if usable <= 0. {
+            return;
+        }
+        let cursor_y = event.position.y.as_f32() - bounds.origin.y.as_f32();
+        let top = details_height(available, (cursor_y - PANE_SPLITTER_HEIGHT / 2.) / usable);
+        let ratio = top / usable;
+        if (self.split_ratio - ratio).abs() > f32::EPSILON {
+            self.split_ratio = ratio;
+            cx.notify();
+        }
+    }
+
+    fn stop_split(&mut self, cx: &mut Context<Self>) {
+        if self.split_dragging {
+            self.split_dragging = false;
+            cx.notify();
+        }
+    }
+
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = *cx.palette();
+        let tabs = [
+            RequestEditorTab::Params,
+            RequestEditorTab::Headers,
+            RequestEditorTab::Auth,
+            RequestEditorTab::Scripts,
+            RequestEditorTab::Settings,
+        ]
+        .into_iter()
+        .map(|tab| {
+            let active = tab == self.tab;
+            let count = self.count(tab);
+            let dot = tab == RequestEditorTab::Scripts && self.has_scripts();
+            div()
+                .id(("subtab", tab as usize))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .h(px(32.))
+                .px(px(2.))
+                .border_b_2()
+                .border_color(if active {
+                    p.accent
+                } else {
+                    transparent_black()
+                })
+                .text_size(px(12.))
+                .cursor_pointer()
+                .text_color(if active { p.text } else { p.text_dim })
+                .hover(|s| s.text_color(p.text))
+                .on_click(cx.listener(move |this, _, _, cx| this.set_tab(tab, cx)))
+                .child(tab.label())
+                .when(count > 0, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(10.5))
+                            .font_family(MONO)
+                            .text_color(if active { p.accent_hi } else { p.text_dim })
+                            .child(count.to_string()),
+                    )
+                })
+                .when(dot, |d| {
+                    d.child(
+                        div()
+                            .id("scripts-dot")
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(if active { p.accent_hi } else { p.accent })
+                            .test_support(),
+                    )
+                })
+                .test_support()
+        });
+
+        div()
+            .flex()
+            .flex_wrap()
+            .flex_none()
+            .items_center()
+            .gap_x(px(16.))
+            .gap_y(px(4.))
+            .min_h(px(38.))
+            .py(px(2.))
+            .px(px(14.))
+            .border_b_1()
+            .border_color(p.border)
+            .children(tabs)
+            .child(div().flex_1())
+            .when_some(self.spec.spec_ref.as_ref(), |d, r| {
+                d.child(
+                    Pill::new(format!("Linked to spec · {}", r.method.full_label()))
+                        .color(p.accent),
+                )
+            })
+            .child(
+                Button::new("request-save", "Save")
+                    .ghost()
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(RequestEditorEvent::Save))),
+            )
+    }
+
+    fn render_kv(&self, target: KvTarget, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = *cx.palette();
+        let list = target.list(&self.spec);
+        let is_multipart = target == KvTarget::Form && self.spec.body.kind == BodyKind::Multipart;
+        let header = div()
+            .flex()
+            .items_center()
+            .h(px(26.))
+            .px(px(14.))
+            .gap(px(8.))
+            .border_b_1()
+            .border_color(p.border)
+            .text_size(px(10.5))
+            .text_color(p.text_dim)
+            .child(div().w(px(16.)).flex_none())
+            .child(div().flex_1().child("KEY"))
+            .when(is_multipart, |d| {
+                d.child(div().w(px(84.)).flex_none().child("TYPE"))
+            })
+            .child(
+                div()
+                    .flex_basis(relative(0.))
+                    .flex_grow(1.4)
+                    .flex_shrink(1.)
+                    .child("VALUE"),
+            )
+            .child(div().flex_1().child("DESCRIPTION"))
+            .child(div().w(px(22.)).flex_none());
+
+        let rows = self.rows(target).iter().enumerate().map(|(ix, row)| {
+            let kv = list.get(ix);
+            let row_id = row.id;
+            let draft = kv.is_none();
+            let enabled = kv.is_none_or(|kv| kv.enabled);
+            let cell = |state: &Entity<InputState>, id: &'static str, mono: bool| {
+                Input::new(state)
+                    .id((id, ix))
+                    .appearance(false)
+                    .text_size(px(12.))
+                    .h(px(30.))
+                    .when(mono, |i| i.font_family(MONO))
+            };
+            let toggle = div()
+                .id(("enabled", ix))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(16.))
+                .rounded(px(4.))
+                .border_1()
+                .when(draft, |d| d.invisible())
+                .when(!draft, |d| {
+                    d.cursor_pointer().on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_row(target, ix, cx)),
+                    )
+                })
+                .map(|d| {
+                    if enabled {
+                        d.bg(p.accent).border_color(p.accent).child(icon(
+                            IconName::Check,
+                            11.,
+                            white(),
+                        ))
+                    } else {
+                        d.border_color(p.border)
+                    }
+                })
+                .test_support();
+            let delete = div().w(px(22.)).flex_none().when(!draft, |d| {
+                d.child(
+                    IconButton::new(("delete", ix), IconName::X)
+                        .size(12.)
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.delete_row(target, ix, cx)),
+                        ),
+                )
+            });
+            div()
+                .id(("row", ix))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(14.))
+                .border_b_1()
+                .border_color(p.border.opacity(0.6))
+                .child(toggle)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .when(!enabled, |d| d.opacity(0.45))
+                        .child(cell(&row.key, "key", true)),
+                )
+                .when(is_multipart, |d| {
+                    let view = cx.entity().downgrade();
+                    d.child(FormFieldTypePicker::new(
+                        ("form-type", ix),
+                        kv.is_some_and(|field| field.file),
+                        move |file, _, cx| {
+                            view.update(cx, |this, cx| this.set_form_field_type(ix, file, cx))
+                                .ok();
+                        },
+                    ))
+                })
+                .child(
+                    div()
+                        .flex_basis(relative(0.))
+                        .flex_grow(1.4)
+                        .flex_shrink(1.)
+                        .min_w_0()
+                        .when(!enabled, |d| d.opacity(0.45))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .min_w_0()
+                                .child(
+                                    cell(&row.value, "value", true)
+                                        .token(|ctx, _, cx| var_token_element(ctx, cx)),
+                                )
+                                .when(is_multipart && kv.is_some_and(|field| field.file), |d| {
+                                    d.child(
+                                        Button::new(
+                                            ("form-pick-file", ix),
+                                            if kv.is_some_and(|field| field.value.is_empty()) {
+                                                "Выбрать…"
+                                            } else {
+                                                "Заменить…"
+                                            },
+                                        )
+                                        .ghost()
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.pick_file(FileTarget::FormField(row_id), cx)
+                                            }),
+                                        ),
+                                    )
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .when(!enabled, |d| d.opacity(0.45))
+                        .child(cell(&row.description, "desc", false)),
+                )
+                .child(delete)
+        });
+
+        div()
+            .id(target.scope())
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(header)
+            .children(rows)
+    }
+
+    fn render_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = *cx.palette();
+        let kind = self.spec.body.kind;
+        let view = cx.entity().downgrade();
+        let selected = BODY_KINDS.iter().position(|k| *k == kind).unwrap_or(0);
+        let toolbar = div()
+            .id("body-toolbar")
+            .flex()
+            .flex_wrap()
+            .flex_none()
+            .items_center()
+            .gap(px(8.))
+            .px(px(14.))
+            .py(px(8.))
+            .child(BodyModePicker::new(selected, move |ix, _, cx| {
+                view.update(cx, |this, cx| this.set_body_kind(BODY_KINDS[ix], cx))
+                    .ok();
+            }))
+            .when_some(self.body_error.clone(), |d, e| {
+                d.child(
+                    div()
+                        .id("body-error")
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(Pill::new(e).color(p.danger))
+                        .test_support(),
+                )
+            })
+            .child(div().flex_1())
+            .when(kind == BodyKind::Json, |d| {
+                d.child(
+                    Button::new("beautify", "Beautify")
+                        .ghost()
+                        .on_click(cx.listener(|this, _, window, cx| this.beautify(window, cx))),
+                )
+            })
+            .when(self.spec.spec_ref.is_some(), |d| {
+                d.child(
+                    Button::new("generate-body", "✦ Generate from schema").on_click(
+                        cx.listener(|_, _, _, cx| cx.emit(RequestEditorEvent::GenerateBody)),
+                    ),
+                )
+            });
+
+        let content = match kind {
+            BodyKind::None => div()
+                .flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.))
+                .text_color(p.text_dim)
+                .child("У этого запроса нет тела")
+                .into_any_element(),
+            BodyKind::Json | BodyKind::Text => div()
+                .id("body-editor")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .border_t_1()
+                .border_color(p.border)
+                .child(
+                    Editor::new(&self.body_editor)
+                        .appearance(false)
+                        .bordered(false)
+                        .font_family(MONO)
+                        .text_size(px(12.))
+                        .h(relative(1.)),
+                )
+                .into_any_element(),
+            BodyKind::Form => self.render_kv(KvTarget::Form, cx).into_any_element(),
+            BodyKind::Multipart => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    div().flex().px(px(14.)).py(px(7.)).child(
+                        Button::new("form-add-file", "Добавить файл")
+                            .icon(IconName::FolderOpen)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.pick_file(FileTarget::NewFormField, cx)
+                            })),
+                    ),
+                )
+                .child(self.render_kv(KvTarget::Form, cx))
+                .into_any_element(),
+            BodyKind::Binary => div()
+                .id("binary-body")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .gap(px(12.))
+                .p(px(16.))
+                .child(
+                    self.spec
+                        .body
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "Файл не выбран".into()),
+                )
+                .child(Button::new("binary-pick-file", "Выбрать файл…").on_click(
+                    cx.listener(|this, _, _, cx| this.pick_file(FileTarget::BinaryBody, cx)),
+                ))
+                .into_any_element(),
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(toolbar)
+            .child(content)
+    }
+
+    fn render_scripts(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = *cx.palette();
+        let current = self.script_stage;
+        let stage_picker = div()
+            .id("script-stage")
+            .flex()
+            .flex_none()
+            .self_start()
+            .p(px(2.))
+            .gap(px(2.))
+            .rounded(px(7.))
+            .bg(p.surface_hi)
+            .children(ScriptStage::ALL.into_iter().enumerate().map(|(ix, stage)| {
+                let active = stage == current;
+                let filled = !stage.script(&self.spec).trim().is_empty();
+                div()
+                    .id(ix)
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .px(px(10.))
+                    .py(px(3.))
+                    .rounded(px(5.))
+                    .text_size(px(11.5))
+                    .cursor_pointer()
+                    .text_color(if active { p.text } else { p.text_dim })
+                    .when(active, |s| s.bg(p.surface).shadow_xs())
+                    .when(!active, |s| s.hover(|s| s.text_color(p.text)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_script_stage(stage, cx)))
+                    .child(stage.label())
+                    .when(filled, |s| {
+                        s.child(
+                            div()
+                                .id(("script-stage-dot", ix))
+                                .size(px(5.))
+                                .rounded_full()
+                                .bg(p.accent)
+                                .test_support(),
+                        )
+                    })
+                    .test_support()
+            }))
+            .test_support();
+
+        let editor = div()
+            .id("script-editor")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .border_t_1()
+            .border_color(p.border)
+            .child(
+                Editor::new(self.script_editor(current))
+                    .appearance(false)
+                    .bordered(false)
+                    .font_family(MONO)
+                    .text_size(px(12.))
+                    .h(relative(1.)),
+            )
+            .test_support();
+
+        let hint = div()
+            .id("script-hint")
+            .flex_none()
+            .px(px(14.))
+            .py(px(5.))
+            .border_t_1()
+            .border_color(p.border)
+            .text_size(px(11.))
+            .text_color(p.text_dim)
+            .child("Postman-совместимый API: pm.environment, pm.response, pm.test, console.log")
+            .test_support();
+
+        let snippets = div()
+            .id("script-snippets")
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(200.))
+            .min_h_0()
+            .overflow_y_scroll()
+            .border_l_1()
+            .border_color(p.border)
+            .p(px(8.))
+            .gap(px(2.))
+            .child(
+                div()
+                    .px(px(6.))
+                    .pb(px(4.))
+                    .text_size(px(10.5))
+                    .text_color(p.text_dim)
+                    .child("Сниппеты"),
+            )
+            .children(
+                current
+                    .snippets()
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, (title, _))| {
+                        div()
+                            .id(("script-snippet", ix))
+                            .px(px(6.))
+                            .py(px(4.))
+                            .rounded(px(5.))
+                            .text_size(px(11.5))
+                            .text_color(p.accent_hi)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(p.surface_hi))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.insert_snippet(ix, window, cx)
+                            }))
+                            .child(*title)
+                            .test_support()
+                    }),
+            );
+
+        div()
+            .id("scripts")
+            .flex()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .px(px(14.))
+                            .py(px(7.))
+                            .child(stage_picker),
+                    )
+                    .child(editor)
+                    .child(hint),
+            )
+            .child(snippets)
+    }
+
+    fn render_auth(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = *cx.palette();
+        let view = cx.entity().downgrade();
+        let current = self.auth_kind;
+
+        let label = |text: &'static str| {
+            div()
+                .w(px(90.))
+                .flex_none()
+                .text_size(px(12.))
+                .text_color(p.text_dim)
+                .child(text)
+        };
+        let field_box = || {
+            div()
+                .flex()
+                .flex_1()
+                .max_w(px(460.))
+                .items_center()
+                .h(px(32.))
+                .px(px(4.))
+                .rounded(px(7.))
+                .bg(p.surface)
+                .border_1()
+                .border_color(p.border)
+        };
+        let input = |state: &Entity<InputState>, id: &'static str, mono: bool| {
+            Input::new(state)
+                .id(id)
+                .appearance(false)
+                .text_size(px(12.))
+                .h(px(30.))
+                .when(mono, |i| i.font_family(MONO))
+                .token(|ctx, _, cx| var_token_element(ctx, cx))
+        };
+        let row = |l: &'static str| div().flex().items_center().gap(px(12.)).child(label(l));
+        let hint = |text: String| {
+            div()
+                .pl(px(102.))
+                .text_size(px(11.5))
+                .text_color(p.text_dim)
+                .child(text)
+        };
+
+        let trigger = div()
+            .id("auth-type")
+            .flex()
+            .items_center()
+            .justify_between()
+            .w(px(260.))
+            .h(px(32.))
+            .px(px(10.))
+            .rounded(px(7.))
+            .bg(p.surface)
+            .border_1()
+            .border_color(p.border)
+            .text_size(px(12.))
+            .cursor_pointer()
+            .hover(|s| s.bg(p.surface_hi))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.auth_menu_open = !this.auth_menu_open;
+                cx.notify();
+            }))
+            .child(current.label())
+            .child(icon(IconName::ChevronDown, 12., p.text_dim))
+            .test_support();
+        let menu =
+            div()
+                .flex()
+                .flex_col()
+                .p(px(4.))
+                .children(AuthKind::ALL.into_iter().enumerate().map(|(ix, k)| {
+                    let view = view.clone();
+                    div()
+                        .id(("auth-option", ix))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .h(px(28.))
+                        .px(px(8.))
+                        .rounded(px(6.))
+                        .text_size(px(12.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(p.surface_hi))
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| this.set_auth_kind(k, cx)).ok();
+                        })
+                        .child(k.label())
+                        .when(k == current, |d| {
+                            d.child(icon(IconName::Check, 13., p.accent))
+                        })
+                        .test_support()
+                }));
+        let dismiss = view.clone();
+        let picker = Popover::new("auth-type-menu")
+            .open(self.auth_menu_open)
+            .width(260.)
+            .trigger(trigger)
+            .child(menu)
+            .on_dismiss(move |_, cx| {
+                dismiss
+                    .update(cx, |this, cx| {
+                        this.auth_menu_open = false;
+                        cx.notify();
+                    })
+                    .ok();
+            });
+
+        let mut body = div()
+            .id("auth")
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .p(px(14.))
+            .child(row("Type").child(picker));
+
+        match current {
+            AuthKind::None => {
+                body = body.child(hint("Запрос будет отправлен без авторизации.".into()));
+            }
+            AuthKind::Inherit => {
+                body = body.child(hint(
+                    "Схема безопасности берётся из спецификации; токен — из переменной {{token}} активного окружения."
+                        .into(),
+                ));
+            }
+            AuthKind::Bearer => {
+                let token = self.token.read(cx).value().to_string();
+                let field = if self.token_revealed {
+                    input(&self.token, "auth-token", true).into_any_element()
+                } else {
+                    div()
+                        .id("auth-token-masked")
+                        .flex_1()
+                        .px(px(8.))
+                        .font_family(MONO)
+                        .text_size(px(12.))
+                        .cursor_text()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.token_revealed = true;
+                            this.token.update(cx, |s, cx| s.focus(window, cx));
+                            cx.notify();
+                        }))
+                        .child(mask_secret(&token))
+                        .test_support()
+                        .into_any_element()
+                };
+                body = body
+                    .child(
+                        row("Token").child(
+                            field_box()
+                                .child(div().flex_1().min_w_0().child(field))
+                                .child(
+                                    IconButton::new(
+                                        "auth-token-eye",
+                                        if self.token_revealed {
+                                            IconName::EyeOff
+                                        } else {
+                                            IconName::Eye
+                                        },
+                                    )
+                                    .size(13.)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.toggle_token_revealed(cx)
+                                        }),
+                                    ),
+                                ),
+                        ),
+                    )
+                    .child(hint(
+                        "Заголовок Authorization: Bearer •••••••• добавится автоматически".into(),
+                    ));
+            }
+            AuthKind::Basic => {
+                body = body
+                    .child(row("Username").child(field_box().child(input(
+                        &self.username,
+                        "auth-username",
+                        true,
+                    ))))
+                    .child(
+                        row("Password").child(
+                            field_box().child(
+                                Input::new(&self.password)
+                                    .id("auth-password")
+                                    .appearance(false)
+                                    .mask_toggle()
+                                    .font_family(MONO)
+                                    .text_size(px(12.))
+                                    .h(px(30.)),
+                            ),
+                        ),
+                    )
+                    .child(hint(
+                        "Заголовок Authorization: Basic •••••••• добавится автоматически".into(),
+                    ));
+            }
+            AuthKind::ApiKey => {
+                let key = self.api_key.read(cx).value().to_string();
+                let key = if key.is_empty() {
+                    "<key>".to_string()
+                } else {
+                    key
+                };
+                let where_ = if self.api_in_query {
+                    format!("Параметр ?{key}=•••• добавится к URL автоматически")
+                } else {
+                    format!("Заголовок {key}: •••• добавится автоматически")
+                };
+                let view = view.clone();
+                body = body
+                    .child(row("Key").child(field_box().child(input(
+                        &self.api_key,
+                        "auth-api-key",
+                        true,
+                    ))))
+                    .child(row("Value").child(field_box().child(input(
+                        &self.api_value,
+                        "auth-api-value",
+                        true,
+                    ))))
+                    .child(
+                        row("Add to").child(
+                            Segmented::new("auth-api-in")
+                                .items(["Header", "Query"])
+                                .selected(self.api_in_query as usize)
+                                .on_select(move |ix, _, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.set_api_key_in_query(ix == 1, cx)
+                                    })
+                                    .ok();
+                                }),
+                        ),
+                    )
+                    .child(hint(where_));
+            }
+        }
+        body
+    }
+}
+
+impl Render for RequestEditor {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Repaint variable highlights in the new palette after a theme switch.
+        if self
+            .body_vars
+            .as_ref()
+            .is_some_and(|(_, _, mode)| *mode != cx.palette().mode)
+        {
+            self.highlight_body_vars(cx);
+        }
+        let p = *cx.palette();
+        let content = match self.tab {
+            RequestEditorTab::Params => self.render_kv(KvTarget::Params, cx).into_any_element(),
+            RequestEditorTab::Headers => self.render_kv(KvTarget::Headers, cx).into_any_element(),
+            RequestEditorTab::Body => self.render_kv(KvTarget::Params, cx).into_any_element(),
+            RequestEditorTab::Auth => self.render_auth(cx).into_any_element(),
+            RequestEditorTab::Scripts => self.render_scripts(cx).into_any_element(),
+            RequestEditorTab::Settings => {
+                let view = cx.entity();
+                RequestRedirectSettings::new(
+                    self.spec.follow_redirects,
+                    self.redirect_defaults.0,
+                    self.redirect_defaults.1,
+                    self.redirect_limit.clone(),
+                    move |follow, _, cx| {
+                        view.update(cx, |this, cx| this.set_follow_redirects(follow, cx));
+                    },
+                )
+                .into_any_element()
+            }
+        };
+        let available = self
+            .split_bounds
+            .get()
+            .map(|b| b.size.height.as_f32())
+            .unwrap_or_else(|| window.viewport_size().height.as_f32());
+        let top_height = details_height(available, self.split_ratio);
+        let bounds = self.split_bounds.clone();
+        div()
+            .id("request-editor")
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_h_0()
+            .bg(p.bg)
+            .text_color(p.text)
+            .on_mouse_move(cx.listener(|this, event, _, cx| this.move_split(event, cx)))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.stop_split(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.stop_split(cx)),
+            )
+            .child(
+                canvas(
+                    move |measured, _, _| bounds.set(Some(measured)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .child(
+                div()
+                    .id("request-details-pane")
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .h(px(top_height))
+                    .min_h(px(MIN_DETAILS_HEIGHT))
+                    .min_w_0()
+                    .child(self.render_header(cx))
+                    .child(content)
+                    .test_support(),
+            )
+            .child(
+                HorizontalPaneSplitter::new("request-body-divider")
+                    .active(self.split_dragging)
+                    .on_drag_start(cx.listener(|this, _, _, cx| {
+                        this.split_dragging = true;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("request-body-pane")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(MIN_BODY_HEIGHT))
+                    .min_w_0()
+                    .child(
+                        div()
+                            .id(("subtab", RequestEditorTab::Body as usize))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .h(px(36.))
+                            .px(px(14.))
+                            .border_b_1()
+                            .border_color(p.border)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Body")
+                            .test_support(),
+                    )
+                    .child(self.render_body(cx))
+                    .test_support(),
+            )
+    }
+}

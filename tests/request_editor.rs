@@ -1,0 +1,569 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use gpui_kit::test::TestWindowExt;
+use gpui_kit::{Entity, TestAppContext, VisualTestContext, point, px};
+use rivet::app::request_editor::{
+    RequestEditor, RequestEditorEvent, RequestEditorTab, ScriptStage,
+};
+use rivet::core::types::{Auth, BodyKind, KeyValue, RequestSpec, Scripts, SpecRef};
+use rivet::model::Method;
+use rivet::theme::Palette;
+
+fn sample() -> RequestSpec {
+    let mut spec = RequestSpec::new("Create order", Method::Post, "{{baseUrl}}/orders");
+    spec.params = vec![
+        KeyValue::new("limit", "10"),
+        KeyValue::new("page", "1").enabled(false),
+    ];
+    spec.headers = vec![KeyValue::new("Accept", "application/json")];
+    spec
+}
+
+fn open(
+    cx: &mut TestAppContext,
+    spec: RequestSpec,
+) -> (
+    Entity<RequestEditor>,
+    &mut VisualTestContext,
+    Rc<RefCell<Vec<RequestEditorEvent>>>,
+) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        Palette::dark().apply(cx);
+    });
+    let (view, window) = cx.add_window_view(|window, cx| RequestEditor::new(spec, window, cx));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let sink = events.clone();
+    window.update(|w, cx| {
+        cx.subscribe(&view, move |_, ev: &RequestEditorEvent, _| {
+            sink.borrow_mut().push(ev.clone())
+        })
+        .detach();
+        w.render_frame(cx);
+    });
+    (view, window, events)
+}
+
+#[gpui_kit::test]
+fn switches_sub_tabs_and_counts(cx: &mut TestAppContext) {
+    let (view, window, _) = open(cx, sample());
+    view.read_with(window, |v, _| {
+        assert_eq!(v.active_tab(), RequestEditorTab::Params);
+        // Disabled "page" isn't counted.
+        assert_eq!(v.count(RequestEditorTab::Params), 1);
+        assert_eq!(v.count(RequestEditorTab::Headers), 1);
+    });
+    window.update(|w, cx| {
+        assert!(w.within("req-params").try_find(("key", 0usize)).is_some());
+        w.click(("subtab", 1usize), cx);
+        w.render_frame(cx);
+        assert!(w.try_find("req-params").is_none());
+        assert!(w.within("req-headers").try_find(("key", 0usize)).is_some());
+        w.click(("subtab", 3usize), cx);
+        w.render_frame(cx);
+        assert!(w.try_find("auth-type").is_some());
+    });
+    assert_eq!(
+        view.read_with(window, |v, _| v.active_tab()),
+        RequestEditorTab::Auth
+    );
+}
+
+#[gpui_kit::test]
+fn request_redirect_settings_override_and_inherit(cx: &mut TestAppContext) {
+    let (view, window, _) = open(cx, sample());
+    window.update(|w, cx| {
+        w.click(("subtab", RequestEditorTab::Settings as usize), cx);
+        w.render_frame(cx);
+        assert!(w.try_find("request-redirect-settings").is_some());
+        w.within("request-follow-redirects").click(2usize, cx);
+        w.click("request-redirect-limit", cx);
+        w.input("3", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |editor, _| {
+        assert_eq!(editor.spec().follow_redirects, Some(false));
+        assert_eq!(editor.spec().max_redirects, Some(3));
+    });
+    window.update(|w, cx| {
+        w.within("request-follow-redirects").click(0usize, cx);
+        w.click("request-redirect-limit", cx);
+        w.press("cmd-a", cx);
+        w.press("backspace", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |editor, _| {
+        assert_eq!(editor.spec().follow_redirects, None);
+        assert_eq!(editor.spec().max_redirects, None);
+    });
+}
+
+#[gpui_kit::test]
+fn body_stays_visible_and_vertical_divider_respects_minimum_heights(cx: &mut TestAppContext) {
+    let (_, window, _) = open(cx, sample());
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.within("req-params").try_find(("key", 0usize)).is_some());
+        assert!(w.try_find("body-mode").is_some());
+        w.click(("subtab", RequestEditorTab::Headers as usize), cx);
+        w.render_frame(cx);
+        assert!(w.within("req-headers").try_find(("key", 0usize)).is_some());
+        assert!(w.try_find("body-mode").is_some());
+
+        let initial = w.find("request-details-pane").bounds().size.height.as_f32();
+        let from = w.find("request-body-divider").bounds().center();
+        w.drag(from, from + point(px(0.), px(80.)), cx);
+        w.render_frame(cx);
+        let expanded = w.find("request-details-pane").bounds().size.height.as_f32();
+        assert!(
+            expanded > initial + 70.,
+            "details pane should follow the divider"
+        );
+
+        let from = w.find("request-body-divider").bounds().center();
+        w.drag(from, from - point(px(0.), px(1000.)), cx);
+        w.render_frame(cx);
+        let details = w.find("request-details-pane").bounds().size.height.as_f32();
+        assert!(
+            (details - 140.).abs() < 2.,
+            "details pane must stop at 140 px"
+        );
+
+        let from = w.find("request-body-divider").bounds().center();
+        w.drag(from, from + point(px(0.), px(1200.)), cx);
+        w.render_frame(cx);
+        let body = w.find("request-body-pane").bounds().size.height.as_f32();
+        assert!((body - 170.).abs() < 2., "body pane must stop at 170 px");
+    });
+}
+
+#[gpui_kit::test]
+fn typing_into_draft_row_adds_header(cx: &mut TestAppContext) {
+    let (view, window, events) = open(cx, sample());
+    window.update(|w, cx| {
+        w.click(("subtab", 1usize), cx);
+        w.render_frame(cx);
+        // Row 1 is the empty draft row.
+        w.within("req-headers").click(("key", 1usize), cx);
+        w.input("X-Trace", cx);
+    });
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.within("req-headers").click(("value", 1usize), cx);
+        w.input("Bearer {{token}}", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| {
+        let h = &v.spec().headers;
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[1].key, "X-Trace");
+        assert_eq!(h[1].value, "Bearer {{token}}");
+        assert!(h[1].enabled);
+        assert_eq!(v.count(RequestEditorTab::Headers), 2);
+    });
+    // A fresh draft row exists after the promoted one.
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.within("req-headers").try_find(("key", 2usize)).is_some());
+        assert!(w.within("req-headers").try_find(("key", 3usize)).is_none());
+    });
+    assert!(events.borrow().contains(&RequestEditorEvent::Changed));
+}
+
+#[gpui_kit::test]
+fn form_data_exposes_file_picker_for_each_file_field(cx: &mut TestAppContext) {
+    let mut spec = sample();
+    spec.body.kind = BodyKind::Multipart;
+    spec.body.form.push(KeyValue::new("attachment", ""));
+    let (view, window, _) = open(cx, spec);
+
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("form-add-file").is_some());
+        w.within(("form-type", 0usize)).click("file", cx);
+        w.render_frame(cx);
+        assert!(
+            w.within("req-form")
+                .try_find(("form-pick-file", 0usize))
+                .is_some()
+        );
+    });
+    assert!(view.read_with(window, |v, _| v.spec().body.form[0].file));
+
+    window.update(|w, cx| {
+        w.within(("form-type", 0usize)).click("text", cx);
+    });
+    assert!(!view.read_with(window, |v, _| v.spec().body.form[0].file));
+}
+
+#[gpui_kit::test]
+fn editing_existing_param_updates_spec(cx: &mut TestAppContext) {
+    let (view, window, _) = open(cx, sample());
+    window.update(|w, cx| {
+        w.within("req-params").click(("value", 0usize), cx);
+        w.press("cmd-a", cx);
+        w.input("25", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| {
+        assert_eq!(v.spec().params[0], KeyValue::new("limit", "25"));
+        assert_eq!(v.spec().params.len(), 2);
+    });
+}
+
+#[gpui_kit::test]
+fn toggle_and_delete_rows(cx: &mut TestAppContext) {
+    let (view, window, _) = open(cx, sample());
+    window.update(|w, cx| w.within("req-params").click(("enabled", 0usize), cx));
+    view.read_with(window, |v, _| {
+        assert!(!v.spec().params[0].enabled);
+        assert_eq!(v.count(RequestEditorTab::Params), 0);
+    });
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.within("req-params").click(("delete", 0usize), cx);
+    });
+    view.read_with(window, |v, _| {
+        assert_eq!(v.spec().params.len(), 1);
+        assert_eq!(v.spec().params[0].key, "page");
+    });
+    // The remaining row's editors moved up with it.
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.within("req-params").click(("key", 0usize), cx);
+        w.press("cmd-right", cx);
+        w.input("s", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    assert_eq!(
+        view.read_with(window, |v, _| v.spec().params[0].key.clone()),
+        "pages"
+    );
+}
+
+#[gpui_kit::test]
+fn body_mode_and_beautify(cx: &mut TestAppContext) {
+    let (view, window, _) = open(cx, sample());
+    window.update(|w, cx| {
+        w.click(("subtab", 2usize), cx);
+        w.render_frame(cx);
+        assert!(w.try_find("beautify").is_none());
+        assert!(
+            w.try_find("generate-body").is_none(),
+            "not linked to a spec"
+        );
+        w.within("body-mode").click(3usize, cx);
+    });
+    assert_eq!(
+        view.read_with(window, |v, _| v.spec().body.kind),
+        BodyKind::Json
+    );
+
+    window.update(|w, cx| {
+        view.update(cx, |v, cx| {
+            v.set_body_text("{\"b\":1,\"a\":[true]}".into(), w, cx)
+        });
+        w.render_frame(cx);
+        w.click("beautify", cx);
+    });
+    view.read_with(window, |v, _| {
+        assert_eq!(
+            v.spec().body.text,
+            "{\n  \"b\": 1,\n  \"a\": [\n    true\n  ]\n}"
+        );
+        assert!(v.body_error().is_none());
+    });
+
+    window.update(|w, cx| {
+        view.update(cx, |v, cx| v.set_body_text("{oops".into(), w, cx));
+        w.render_frame(cx);
+        w.click("beautify", cx);
+        w.render_frame(cx);
+        assert!(w.try_find("body-error").is_some());
+    });
+    view.read_with(window, |v, _| {
+        assert!(v.body_error().unwrap().starts_with("Невалидный JSON:"));
+        assert_eq!(v.spec().body.text, "{oops");
+    });
+
+    // Text mode, then Form mode with its own editable rows.
+    window.update(|w, cx| {
+        w.within("body-mode").click(4usize, cx);
+        w.render_frame(cx);
+        assert!(w.try_find("body-error").is_none());
+        w.within("body-mode").click(2usize, cx);
+        w.render_frame(cx);
+        w.within("req-form").click(("key", 0usize), cx);
+        w.input("email", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| {
+        assert_eq!(v.spec().body.kind, BodyKind::Form);
+        assert_eq!(v.spec().body.form, vec![KeyValue::new("email", "")]);
+    });
+}
+
+#[gpui_kit::test]
+fn auth_type_switch_and_bearer(cx: &mut TestAppContext) {
+    let (view, window, _) = open(cx, sample());
+    window.update(|w, cx| {
+        w.click(("subtab", 3usize), cx);
+        w.render_frame(cx);
+        w.click("auth-type", cx);
+        w.render_frame(cx);
+        w.click(("auth-option", 1usize), cx); // Bearer
+        w.render_frame(cx);
+        // Empty token: the input is shown so it can be typed into.
+        w.click("auth-token", cx);
+        w.input("eyJhbGciOiJIUzI1NiJ9.e30.abc3fQ", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    assert_eq!(
+        view.read_with(window, |v, _| v.spec().auth.clone()),
+        Auth::Bearer {
+            token: "eyJhbGciOiJIUzI1NiJ9.e30.abc3fQ".into()
+        }
+    );
+
+    // Reloading masks the token until the eye is clicked.
+    window.update(|w, cx| {
+        let spec = view.read(cx).spec().clone();
+        view.update(cx, |v, cx| v.set_spec(spec, w, cx));
+        w.render_frame(cx);
+        assert!(w.try_find("auth-token").is_none());
+        assert!(w.try_find("auth-token-masked").is_some());
+        w.click("auth-token-eye", cx);
+        w.render_frame(cx);
+        assert!(w.try_find("auth-token").is_some());
+    });
+
+    window.update(|w, cx| {
+        w.click("auth-type", cx);
+        w.render_frame(cx);
+        w.click(("auth-option", 3usize), cx); // API Key
+        w.render_frame(cx);
+        w.click("auth-api-key", cx);
+        w.input("X-Key", cx);
+    });
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.within("auth-api-in").click(1usize, cx);
+    });
+    assert_eq!(
+        view.read_with(window, |v, _| v.spec().auth.clone()),
+        Auth::ApiKey {
+            key: "X-Key".into(),
+            value: String::new(),
+            in_query: true
+        }
+    );
+
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.click("auth-type", cx);
+        w.render_frame(cx);
+        w.click(("auth-option", 4usize), cx); // No auth
+    });
+    assert_eq!(
+        view.read_with(window, |v, _| v.spec().auth.clone()),
+        Auth::None
+    );
+}
+
+#[gpui_kit::test]
+fn generate_body_emitted_only_when_linked(cx: &mut TestAppContext) {
+    let mut spec = sample();
+    spec.spec_ref = Some(SpecRef {
+        method: Method::Post,
+        path: "/orders".into(),
+    });
+    let (view, window, events) = open(cx, spec);
+    window.update(|w, cx| {
+        w.click(("subtab", 2usize), cx);
+        w.render_frame(cx);
+        w.click("generate-body", cx);
+    });
+    assert!(events.borrow().contains(&RequestEditorEvent::GenerateBody));
+
+    window.update(|w, cx| {
+        view.update(cx, |v, cx| v.set_body_text("{\"id\": 1}".into(), w, cx));
+    });
+    view.read_with(window, |v, _| {
+        assert_eq!(v.spec().body.kind, BodyKind::Json);
+        assert_eq!(v.spec().body.text, "{\"id\": 1}");
+    });
+}
+
+#[gpui_kit::test]
+fn set_spec_rebuilds_rows(cx: &mut TestAppContext) {
+    let (view, window, events) = open(cx, sample());
+    let mut other = RequestSpec::new("Other", Method::Get, "/x");
+    other.params = vec![
+        KeyValue::new("a", "1"),
+        KeyValue::new("b", "{{v}}"),
+        KeyValue::new("c", "3"),
+    ];
+    other.auth = Auth::Basic {
+        username: "u".into(),
+        password: "p".into(),
+    };
+    window.update(|w, cx| {
+        view.update(cx, |v, cx| v.set_spec(other.clone(), w, cx));
+        w.render_frame(cx);
+        assert!(
+            w.within("req-params").try_find(("key", 3usize)).is_some(),
+            "3 rows + draft"
+        );
+        assert!(w.within("req-params").try_find(("key", 4usize)).is_none());
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| assert_eq!(v.spec(), &other));
+    assert!(events.borrow().is_empty(), "set_spec emits nothing");
+
+    // Editing after a rebuild targets the new rows.
+    window.update(|w, cx| {
+        w.within("req-params").click(("key", 2usize), cx);
+        w.press("cmd-right", cx);
+        w.input("c", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| {
+        assert_eq!(v.spec().params[2].key, "cc");
+        assert_eq!(v.spec().params[1].value, "{{v}}");
+    });
+}
+
+#[gpui_kit::test]
+fn scripts_tab_typing_updates_pre_request(cx: &mut TestAppContext) {
+    let (view, window, events) = open(cx, sample());
+    window.update(|w, cx| {
+        assert!(w.try_find("scripts-dot").is_none());
+        w.click(("subtab", RequestEditorTab::Scripts as usize), cx);
+        w.render_frame(cx);
+        assert!(w.try_find("script-stage").is_some());
+        assert!(w.try_find("script-hint").is_some());
+        assert!(w.try_find(("script-snippet", 0usize)).is_some());
+        w.click("script-editor", cx);
+        w.input("console.log(1);", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| {
+        assert_eq!(v.active_tab(), RequestEditorTab::Scripts);
+        assert_eq!(v.script_stage(), ScriptStage::PreRequest);
+        assert_eq!(v.spec().scripts.pre_request, "console.log(1);");
+        assert!(v.spec().scripts.post_response.is_empty());
+        assert!(v.has_scripts());
+    });
+    assert!(events.borrow().contains(&RequestEditorEvent::Changed));
+    window.update(|w, _| {
+        assert!(w.try_find("scripts-dot").is_some());
+        assert!(
+            w.within("script-stage")
+                .try_find(("script-stage-dot", 0usize))
+                .is_some()
+        );
+        assert!(
+            w.within("script-stage")
+                .try_find(("script-stage-dot", 1usize))
+                .is_none()
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn scripts_post_response_snippet(cx: &mut TestAppContext) {
+    let (view, window, events) = open(cx, sample());
+    window.update(|w, cx| {
+        w.click(("subtab", RequestEditorTab::Scripts as usize), cx);
+        w.render_frame(cx);
+        w.within("script-stage").click(1usize, cx);
+        w.render_frame(cx);
+        w.click(("script-snippet", 0usize), cx);
+    });
+    view.read_with(window, |v, _| {
+        assert_eq!(v.script_stage(), ScriptStage::PostResponse);
+        assert!(
+            v.spec()
+                .scripts
+                .post_response
+                .contains("pm.response.json()")
+        );
+        assert!(v.spec().scripts.pre_request.is_empty());
+    });
+    assert!(events.borrow().contains(&RequestEditorEvent::Changed));
+
+    // A second snippet goes on its own line after the first.
+    window.update(|w, cx| {
+        view.update(cx, |v, cx| v.insert_snippet(1, w, cx));
+    });
+    view.read_with(window, |v, _| {
+        let post = &v.spec().scripts.post_response;
+        assert!(post.starts_with("const json = pm.response.json();"));
+        assert!(post.contains(");\npm.test(\"Status is 200\""));
+    });
+
+    // Typing into the post-response editor edits that script only.
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.click("script-editor", cx);
+        w.press("cmd-a", cx);
+        w.input("x", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| {
+        assert_eq!(v.spec().scripts.post_response, "x");
+        assert!(v.spec().scripts.pre_request.is_empty());
+    });
+}
+
+#[gpui_kit::test]
+fn set_spec_loads_scripts(cx: &mut TestAppContext) {
+    let (view, window, events) = open(cx, sample());
+    let mut other = sample();
+    other.scripts = Scripts {
+        pre_request: "pm.environment.set(\"a\", \"1\");".into(),
+        post_response: "console.log(2);".into(),
+    };
+    window.update(|w, cx| {
+        view.update(cx, |v, cx| {
+            v.set_spec(other.clone(), w, cx);
+            v.set_tab(RequestEditorTab::Scripts, cx);
+        });
+        w.render_frame(cx);
+        assert!(w.try_find("scripts-dot").is_some());
+        assert!(
+            w.within("script-stage")
+                .try_find(("script-stage-dot", 1usize))
+                .is_some()
+        );
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| assert_eq!(v.spec(), &other));
+    assert!(events.borrow().is_empty(), "set_spec emits nothing");
+
+    // Both editors hold the loaded text: appending keeps the rest.
+    window.update(|w, cx| {
+        w.click("script-editor", cx);
+        w.press("cmd-end", cx);
+        w.input("//", cx);
+    });
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        view.update(cx, |v, cx| {
+            v.set_script_stage(ScriptStage::PostResponse, cx)
+        });
+        w.render_frame(cx);
+        w.click("script-editor", cx);
+        w.press("cmd-end", cx);
+        w.input("//", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| {
+        assert_eq!(
+            v.spec().scripts.pre_request,
+            "pm.environment.set(\"a\", \"1\");//"
+        );
+        assert_eq!(v.spec().scripts.post_response, "console.log(2);//");
+    });
+}

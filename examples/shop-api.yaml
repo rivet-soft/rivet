@@ -1,0 +1,493 @@
+openapi: 3.0.3
+info:
+  title: Shop API
+  version: 2.3.0
+  description: |
+    Демо-API интернет-магазина: заказы, товары, покупатели и авторизация.
+  contact:
+    name: Shop API Team
+    email: api@shop.com
+servers:
+  - url: https://dev.shop.local/api
+    description: Development
+  - url: https://api.shop.com/v2
+    description: Production
+security:
+  - bearerAuth: []
+tags:
+  - name: orders
+    description: Заказы
+  - name: products
+    description: Каталог товаров
+  - name: customers
+    description: Покупатели
+  - name: auth
+    description: Авторизация
+paths:
+  /orders:
+    get:
+      tags: [orders]
+      summary: List orders
+      operationId: listOrders
+      description: Список заказов с фильтрацией по статусу и курсорной пагинацией.
+      parameters:
+        - name: status
+          in: query
+          description: Фильтр по статусу заказа
+          schema:
+            $ref: '#/components/schemas/OrderStatus'
+          example: paid
+        - name: limit
+          in: query
+          description: Максимальное количество заказов на странице
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          example: 20
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Страница заказов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [orders]
+      summary: Create order
+      operationId: createOrder
+      description: Создаёт новый заказ для покупателя.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderCreate'
+      responses:
+        '201':
+          description: Заказ создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /orders/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [orders]
+      summary: Get order
+      operationId: getOrder
+      responses:
+        '200':
+          description: Заказ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [orders]
+      summary: Update order
+      operationId: updateOrder
+      description: Частичное обновление заказа (статус, адрес доставки).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderUpdate'
+      responses:
+        '200':
+          description: Обновлённый заказ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [orders]
+      summary: Delete order
+      operationId: deleteOrder
+      responses:
+        '204':
+          description: Заказ удалён
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /products:
+    get:
+      tags: [products]
+      summary: List products
+      operationId: listProducts
+      parameters:
+        - name: q
+          in: query
+          description: Поиск по названию
+          schema:
+            type: string
+          example: кружка
+        - name: category
+          in: query
+          description: Категория товара
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Максимальное количество товаров
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+          example: 20
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Страница товаров
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Product'
+                  nextCursor:
+                    type: string
+                    nullable: true
+  /products/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [products]
+      summary: Get product
+      operationId: getProduct
+      responses:
+        '200':
+          description: Товар
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /customers:
+    get:
+      tags: [customers]
+      summary: List customers
+      operationId: listCustomers
+      parameters:
+        - name: email
+          in: query
+          description: Поиск по email
+          schema:
+            type: string
+            format: email
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Страница покупателей
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Customer'
+                  nextCursor:
+                    type: string
+                    nullable: true
+    post:
+      tags: [customers]
+      summary: Create customer
+      operationId: createCustomer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomerCreate'
+            example:
+              name: Анна Иванова
+              email: anna@example.com
+              phone: '+79001234567'
+      responses:
+        '201':
+          description: Покупатель создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+        '409':
+          description: Покупатель с таким email уже существует
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Login
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: admin@shop.com
+                password:
+                  type: string
+                  format: password
+                  minLength: 8
+                  example: secret123
+      responses:
+        '200':
+          description: Токены доступа
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Refresh
+      operationId: refreshToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: Новая пара токенов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        default:
+          description: Ошибка
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      description: Идентификатор ресурса
+      schema:
+        type: string
+      example: ord_8f2a
+    Cursor:
+      name: cursor
+      in: query
+      description: Курсор следующей страницы
+      schema:
+        type: string
+  responses:
+    BadRequest:
+      description: Некорректный запрос
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Требуется авторизация
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Не найдено
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    OrderStatus:
+      type: string
+      enum: [pending, paid, shipped, cancelled]
+    Address:
+      type: object
+      properties:
+        city:
+          type: string
+          example: Москва
+        street:
+          type: string
+          example: ул. Тверская, 1
+    OrderItem:
+      type: object
+      required: [productId, quantity]
+      properties:
+        productId:
+          type: string
+          example: prd_42
+        quantity:
+          type: integer
+          minimum: 1
+          description: Количество единиц товара в позиции заказа
+          example: 2
+        price:
+          type: number
+          minimum: 0
+          example: 499.9
+    OrderCreate:
+      type: object
+      required: [customerId, items]
+      properties:
+        customerId:
+          type: string
+          example: cus_1001
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        shippingAddress:
+          $ref: '#/components/schemas/Address'
+    OrderUpdate:
+      type: object
+      properties:
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        shippingAddress:
+          $ref: '#/components/schemas/Address'
+    Order:
+      type: object
+      required: [id, status, customerId, items, total, createdAt]
+      properties:
+        id:
+          type: string
+          example: ord_8f2a
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        customerId:
+          type: string
+          example: cus_1001
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        shippingAddress:
+          $ref: '#/components/schemas/Address'
+        total:
+          type: number
+          minimum: 0
+          example: 999.8
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-10-15T12:30:00Z'
+    OrderList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Order'
+        nextCursor:
+          type: string
+          nullable: true
+    Product:
+      type: object
+      required: [id, name, price]
+      properties:
+        id:
+          type: string
+          example: prd_42
+        name:
+          type: string
+          example: Кружка «Relay»
+        price:
+          type: number
+          minimum: 0
+          example: 499.9
+        category:
+          type: string
+          example: посуда
+        inStock:
+          type: boolean
+          example: true
+    CustomerCreate:
+      type: object
+      required: [name, email]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+          pattern: '^\+[0-9]{10,15}$'
+    Customer:
+      allOf:
+        - $ref: '#/components/schemas/CustomerCreate'
+        - type: object
+          required: [id, createdAt]
+          properties:
+            id:
+              type: string
+              format: uuid
+            createdAt:
+              type: string
+              format: date-time
+    TokenPair:
+      type: object
+      required: [accessToken, refreshToken, expiresIn]
+      properties:
+        accessToken:
+          type: string
+          example: eyJhbGciOiJIUzI1NiJ9.e30.sig
+        refreshToken:
+          type: string
+        expiresIn:
+          type: integer
+          example: 3600
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: not_found
+        message:
+          type: string
+          example: Ресурс не найден

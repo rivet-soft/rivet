@@ -1,0 +1,62 @@
+[package]
+name = "rivet"
+version = "0.1.0"
+edition = "2024"
+default-run = "rivet"
+
+[dependencies]
+gpui-kit = { version = "0.7.3", features = ["tree-sitter", "tree-sitter-javascript"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml = "0.9"
+dirs = "6"
+uuid = { version = "1", features = ["v4"] }
+boa_engine = "0.22"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+wry = { version = "0.57", default-features = false, features = ["devtools"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+http = "1"
+bytes = "1"
+cookie_store = { version = "0.22", default-features = false }
+url = "2"
+flate2 = "1"
+brotli-decompressor = "5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3", features = ["NSData"] }
+
+[build-dependencies]
+winres = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+gpui-kit = { version = "0.7.3", features = ["test-support", "tree-sitter", "tree-sitter-javascript"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+
+# The JS engine is interpreter-heavy: optimise it even in debug builds so
+# scripts run at near-release speed under `cargo run`.
+[profile.dev.package.boa_engine]
+opt-level = 3
+
+[profile.dev.package.boa_parser]
+opt-level = 3
+
+[profile.dev.package.boa_gc]
+opt-level = 3
+
+[profile.dev.package.boa_ast]
+opt-level = 3
+
+# On Linux the Browser response mode needs WebKitGTK (wry's os-webview).
+[target.'cfg(target_os = "linux")'.dependencies]
+wry = { version = "0.57", default-features = false, features = ["devtools", "os-webview"] }

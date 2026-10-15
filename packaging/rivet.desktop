@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Rivet
+Comment=Fast native HTTP client for APIs
+Exec=rivet
+Icon=rivet
+Categories=Development;Network;
+Terminal=false
