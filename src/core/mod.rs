@@ -1,15 +1,22 @@
 //! UI-free core: data model, HTTP execution, OpenAPI, persistence.
 //! Submodules are owned by separate workstreams; see PLAN.md.
 
+pub mod collection_run;
 pub mod curl;
 pub mod http;
+pub mod import;
+pub mod mcp_activity;
+pub mod mcp_clients;
 pub mod openapi;
 pub(crate) mod openapi_refs;
 pub mod postman;
+pub mod project_ops;
 pub mod rt;
 pub mod runner;
 pub mod schema;
+pub mod schema_hover;
 pub mod script;
+pub mod secrets;
 pub mod store;
 pub mod types;
 pub mod vars;

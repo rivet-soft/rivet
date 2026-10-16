@@ -23,7 +23,69 @@ fn install_app_icon() {
     }
 }
 
+const USAGE: &str = "Usage:
+  rivet                         open the app
+  rivet mcp [--project <file>]  MCP server over stdio (default project: the app's project.json)
+  rivet --version";
+
+/// Command-line modes that run without a window. Returns `None` for the GUI.
+fn cli(args: &[String]) -> Option<i32> {
+    match args.first().map(String::as_str) {
+        Some("--version" | "-V" | "version") => {
+            println!("Rivet {}", env!("RIVET_VERSION"));
+            Some(0)
+        }
+        Some("--help" | "-h" | "help") => {
+            println!("{USAGE}");
+            Some(0)
+        }
+        Some("mcp") => Some(run_mcp(&args[1..])),
+        _ => None,
+    }
+}
+
+/// `rivet mcp`: stdout carries only protocol messages, diagnostics go to stderr.
+fn run_mcp(args: &[String]) -> i32 {
+    let mut project = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--project" | "-p" => match rest.next() {
+                Some(path) => project = Some(std::path::PathBuf::from(path)),
+                None => {
+                    eprintln!("rivet mcp: --project needs a path\n{USAGE}");
+                    return 2;
+                }
+            },
+            other => match other.strip_prefix("--project=") {
+                Some(path) => project = Some(std::path::PathBuf::from(path)),
+                None => {
+                    eprintln!("rivet mcp: unknown argument '{other}'\n{USAGE}");
+                    return 2;
+                }
+            },
+        }
+    }
+    let path = project.unwrap_or_else(|| {
+        let path = store::default_path();
+        store::migrate_legacy(&path, &store::legacy_path());
+        path
+    });
+    eprintln!("rivet mcp {}: project {}", env!("RIVET_VERSION"), path.display());
+    match rivet::mcp::serve_stdio(path) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("rivet mcp: {e}");
+            1
+        }
+    }
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = cli(&args) {
+        std::process::exit(code);
+    }
     gpui_kit::application()
         .with_assets(rivet::assets::RelayAssets)
         .run(|cx| {

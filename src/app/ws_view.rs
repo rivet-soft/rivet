@@ -316,7 +316,8 @@ pub(crate) fn ws_tree_row(
         .h(px(26.))
         .mx(px(4.))
         .pl(px(28. + 16. * depth as f32))
-        .pr(px(10.))
+        // Room for the sidebar's absolutely positioned "···" menu button.
+        .pr(px(40.))
         .rounded(px(5.))
         .cursor_pointer()
         .when(selected, |s| s.bg(p.surface_hi))

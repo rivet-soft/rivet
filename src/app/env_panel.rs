@@ -34,13 +34,8 @@ pub fn env_color(c: EnvColor, p: &Palette) -> Hsla {
     }
 }
 
-/// Keys whose values are masked by default (`token`, `password`, `apiSecret`…).
-pub fn is_secret_key(key: &str) -> bool {
-    let k = key.to_ascii_lowercase();
-    ["token", "password", "secret", "apikey", "api_key", "passwd"]
-        .iter()
-        .any(|s| k.contains(s))
-}
+/// Keys whose values are masked by default (shared with the MCP server).
+pub use crate::core::secrets::is_secret_key;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnvPanelEvent {

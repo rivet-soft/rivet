@@ -2,7 +2,7 @@ use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::sidebar::{COLLECTIONS_SIDEBAR_WIDTH, HISTORY_SIDEBAR_WIDTH};
+use super::sidebar::{SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH};
 use super::ws_view::{WsBadge, WsStatus};
 use super::{MODE_RAIL_WIDTH, Workspace, is_destructive};
 use crate::core::{Method, new_id, vars, ws};
@@ -26,11 +26,7 @@ fn request_pane_width(available: f32, ratio: f32) -> f32 {
 impl Workspace {
     fn request_body_width(&self, window: &Window) -> f32 {
         let sidebar_width = if self.sidebar_visible {
-            if self.rail == crate::model::RailMode::History {
-                HISTORY_SIDEBAR_WIDTH
-            } else {
-                COLLECTIONS_SIDEBAR_WIDTH
-            }
+            self.sidebar_width + PANE_SPLITTER_WIDTH
         } else {
             0.
         };
@@ -59,6 +55,52 @@ impl Workspace {
         if (self.request_split_ratio - ratio).abs() > f32::EPSILON {
             self.request_split_ratio = ratio;
             cx.notify();
+        }
+    }
+
+    pub(super) fn start_sidebar_drag(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if event.click_count >= 2 {
+            // Double click resets to the default width.
+            self.set_sidebar_width(SIDEBAR_DEFAULT_WIDTH, cx);
+            self.commit_sidebar_width(cx);
+            return;
+        }
+        self.sidebar_drag = Some((event.position.x.as_f32(), self.sidebar_width));
+        cx.notify();
+    }
+
+    pub(super) fn move_sidebar_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some((start_x, start_width)) = self.sidebar_drag else { return };
+        if event.pressed_button.is_none() {
+            self.stop_sidebar_drag(cx);
+            return;
+        }
+        self.set_sidebar_width(start_width + event.position.x.as_f32() - start_x, cx);
+    }
+
+    pub(super) fn stop_sidebar_drag(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_drag.take().is_some() {
+            self.commit_sidebar_width(cx);
+            cx.notify();
+        }
+    }
+
+    /// Clamped live width while dragging.
+    pub fn set_sidebar_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let width = width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        if (self.sidebar_width - width).abs() > f32::EPSILON {
+            self.sidebar_width = width;
+            cx.notify();
+        }
+    }
+
+    /// Persists the width in project.json once the drag ends.
+    fn commit_sidebar_width(&mut self, cx: &mut Context<Self>) {
+        let width = self.sidebar_width.round() as u32;
+        let stored = (width != SIDEBAR_DEFAULT_WIDTH as u32).then_some(width);
+        if self.project.sidebar_width != stored {
+            self.project.sidebar_width = stored;
+            self.schedule_save(cx);
         }
     }
 

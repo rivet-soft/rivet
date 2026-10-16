@@ -345,6 +345,31 @@ pub struct Settings {
     /// HTTP protocol to use (see [`HttpVersionPref`]).
     #[serde(default)]
     pub http_version: HttpVersionPref,
+    /// What AI assistants may do through `rivet mcp` (Settings → MCP).
+    #[serde(default)]
+    pub mcp: McpSettings,
+}
+
+/// Permissions of the MCP server (`rivet mcp`), edited in Settings → MCP and
+/// re-read by the server on every tool call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpSettings {
+    /// Tool calls are refused when off (`initialize` and `tools/list` still work).
+    pub enabled: bool,
+    /// Only reading tools; sends still run (with `allow_send`) but don't save
+    /// variable changes or history.
+    pub read_only: bool,
+    /// `send_request` / `run_collection` are allowed.
+    pub allow_send: bool,
+    /// The `reveal_secrets` tool argument is honoured; otherwise secrets stay masked.
+    pub reveal_secrets: bool,
+}
+
+impl Default for McpSettings {
+    fn default() -> Self {
+        Self { enabled: true, read_only: false, allow_send: true, reveal_secrets: false }
+    }
 }
 
 /// Protocol selection for requests.
@@ -379,6 +404,7 @@ impl Default for Settings {
             cookies_enabled: true,
             mock_server: None,
             http_version: HttpVersionPref::Auto,
+            mcp: McpSettings::default(),
         }
     }
 }
@@ -404,6 +430,9 @@ pub struct Project {
     pub open_tabs: Vec<RequestSpec>,
     #[serde(default)]
     pub active_tab: Option<usize>,
+    /// Width of the collections/history sidebar, as the user dragged it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_width: Option<u32>,
 }
 
 /// Request after `{{var}}` substitution, params and auth applied: ready to send.

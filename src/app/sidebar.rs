@@ -11,8 +11,11 @@ use crate::ui::{
     TreeRow, icon, shortcut_hint,
 };
 
-pub(super) const COLLECTIONS_SIDEBAR_WIDTH: f32 = 260.;
-pub(super) const HISTORY_SIDEBAR_WIDTH: f32 = 320.;
+/// Default width of the sidebar (collections and history share one width).
+pub(super) const SIDEBAR_DEFAULT_WIDTH: f32 = 260.;
+/// Drag limits for the sidebar width.
+pub(super) const SIDEBAR_MIN_WIDTH: f32 = 200.;
+pub(super) const SIDEBAR_MAX_WIDTH: f32 = 520.;
 
 impl Workspace {
     fn toggle_sidebar_menu(&mut self, target: SidebarMenu, cx: &mut Context<Self>) {
@@ -289,12 +292,10 @@ impl Workspace {
             .flex_none()
             .w(px(width))
             .bg(p.surface)
-            .border_r_1()
-            .border_color(p.border)
     }
 
     fn render_history_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.sidebar_shell(HISTORY_SIDEBAR_WIDTH, cx)
+        self.sidebar_shell(self.sidebar_width, cx)
             .child(self.history_panel.clone())
             .into_any_element()
     }
@@ -603,6 +604,8 @@ impl Workspace {
                                 )
                                 .depth(request_depth)
                                 .selected(selected)
+                                // Room for the absolutely positioned "···" menu button.
+                                .trailing_padding(40.)
                                 .on_click(cx.listener(
                                     move |this, _, window, cx| this.open_saved(ci, ri, window, cx),
                                 ))
@@ -622,7 +625,7 @@ impl Workspace {
             }
         }
 
-        self.sidebar_shell(COLLECTIONS_SIDEBAR_WIDTH, cx)
+        self.sidebar_shell(self.sidebar_width, cx)
             .child(
                 div()
                     .flex()

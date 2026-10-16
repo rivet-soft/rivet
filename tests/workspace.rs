@@ -1057,3 +1057,52 @@ fn collection_variables_set_persists_in_collection(cx: &mut TestAppContext) {
         assert_eq!(v.project.environments[0].var("tokentmp"), None, "environment untouched");
     });
 }
+
+#[gpui_kit::test]
+fn sidebar_width_is_draggable_clamped_and_persisted(cx: &mut TestAppContext) {
+    let (view, window) = open(cx);
+    let start = view.read_with(window, |v, _| v.sidebar_width);
+    assert_eq!(start, 260.);
+
+    // Drag the splitter 120 px to the right.
+    window.update(|w, cx| {
+        let b = w.find("sidebar-splitter").bounds();
+        let from = b.center();
+        let to = gpui_kit::point(from.x + gpui_kit::px(120.), from.y);
+        w.drag(from, to, cx);
+    });
+    let dragged = view.read_with(window, |v, _| v.sidebar_width);
+    assert!((dragged - 380.).abs() < 2., "width {dragged}");
+    assert_eq!(view.read_with(window, |v, _| v.project.sidebar_width), Some(dragged.round() as u32));
+
+    // Way past the limits clamps to min / max.
+    view.update(window, |v, cx| v.set_sidebar_width(5000., cx));
+    assert_eq!(view.read_with(window, |v, _| v.sidebar_width), 520.);
+    view.update(window, |v, cx| v.set_sidebar_width(10., cx));
+    assert_eq!(view.read_with(window, |v, _| v.sidebar_width), 200.);
+
+    // Double click resets to the default and clears the stored width.
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.double_click("sidebar-splitter", cx);
+    });
+    view.read_with(window, |v, _| {
+        assert_eq!(v.sidebar_width, 260.);
+        assert_eq!(v.project.sidebar_width, None);
+    });
+}
+
+#[gpui_kit::test]
+fn stored_sidebar_width_is_restored(cx: &mut TestAppContext) {
+    let mut p = project();
+    p.sidebar_width = Some(410);
+    let (view, window) = open_with(cx, p);
+    assert_eq!(view.read_with(window, |v, _| v.sidebar_width), 410.);
+    window.update(|w, cx| {
+        let rail = w.find("mode-rail").bounds();
+        let splitter = w.find("sidebar-splitter").bounds();
+        let sidebar = splitter.origin.x.as_f32() - (rail.origin.x + rail.size.width).as_f32();
+        assert!((sidebar - 410.).abs() < 1.5, "sidebar {sidebar}");
+        let _ = cx;
+    });
+}

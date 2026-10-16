@@ -85,6 +85,11 @@ const MODE_RAIL_WIDTH: f32 = 48.;
 /// Native close/minimize/zoom button height incl. AppKit's frame padding.
 const TRAFFIC_LIGHT_HEIGHT: f32 = 16.;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
+/// How often project.json is checked for changes made by other processes
+/// (e.g. `rivet mcp`).
+pub const EXTERNAL_POLL: Duration = Duration::from_secs(1);
+/// Status bar notice after merging an external change of project.json.
+pub const EXTERNAL_NOTICE: &str = "Проект обновлён извне";
 
 pub fn window_options(cx: &App) -> WindowOptions {
     let base = gpui_kit::component::TitleBar::window_options();
@@ -144,6 +149,33 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Stamp first, then content: a write in between changes the stamp again, so
+/// the next poll still notices it.
+fn disk_fingerprint(path: &std::path::Path) -> (Option<store::FileStamp>, Option<u64>) {
+    let stamp = store::file_stamp(path);
+    let hash = std::fs::read(path).ok().map(|bytes| store::content_hash(&bytes));
+    (stamp, hash)
+}
+
+fn find_request<'a>(project: &'a Project, id: &str) -> Option<(&'a str, &'a RequestSpec)> {
+    project.collections.iter().find_map(|c| {
+        c.requests
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| (c.id.as_str(), r))
+    })
+}
+
+/// Same request content, ignoring the owning-collection back-reference (tabs
+/// opened from a collection carry it, stored copies may not).
+fn same_request(a: &RequestSpec, b: &RequestSpec) -> bool {
+    let mut a = a.clone();
+    let mut b = b.clone();
+    a.collection_id = None;
+    b.collection_id = None;
+    a == b
 }
 
 fn host_of(url: &str) -> String {
@@ -217,6 +249,10 @@ pub struct Workspace {
     app_menu_bar: Option<Entity<AppMenuBar>>,
     /// Request/response pane split, measured against the available content width.
     request_split_ratio: f32,
+    /// Sidebar width (collections / history), dragged by its splitter.
+    pub sidebar_width: f32,
+    /// Drag in progress: (cursor x at start, width at start).
+    sidebar_drag: Option<(f32, f32)>,
     request_split_dragging: bool,
     request_split_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub tabs: Vec<RequestTab>,
@@ -254,6 +290,19 @@ pub struct Workspace {
     notice_generation: u64,
     save_task: Option<Task<()>>,
     notice_task: Option<Task<()>>,
+    /// Project as last read from / written to `store_path`: the base of the
+    /// three-way merge with external changes.
+    synced: Project,
+    /// Stamp and content hash of the store file as the app last saw it, so its
+    /// own saves are not mistaken for external changes.
+    disk_stamp: Option<store::FileStamp>,
+    disk_hash: Option<u64>,
+    /// An external change was merged: panels and the active tab's views must be
+    /// reloaded on the next render (they need a window).
+    external_stale: bool,
+    /// The active tab's request was refreshed from disk.
+    active_stale: bool,
+    _poll_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -265,6 +314,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
+        let project_sidebar_width = project
+            .sidebar_width
+            .map(|w| w as f32)
+            .unwrap_or(sidebar::SIDEBAR_DEFAULT_WIDTH)
+            .clamp(sidebar::SIDEBAR_MIN_WIDTH, sidebar::SIDEBAR_MAX_WIDTH);
         window.focus(&focus, cx);
 
         let (spec, spec_error) = match &project.spec_path {
@@ -333,7 +387,7 @@ impl Workspace {
         let collection_panel =
             cx.new(|cx| CollectionPanel::new(project.collections.clone(), window, cx));
         let settings_panel = cx.new(|cx| {
-            SettingsPanel::new(
+            let mut panel = SettingsPanel::new(
                 project.settings.clone(),
                 store_path
                     .as_ref()
@@ -341,10 +395,26 @@ impl Workspace {
                     .unwrap_or_else(|| "В памяти".into()),
                 window,
                 cx,
-            )
+            );
+            panel.set_project_path(store_path.clone(), cx);
+            panel
         });
         history_panel.update(cx, |p, cx| p.set_entries(project.history.clone(), cx));
         let app_menu_bar = (!cfg!(target_os = "macos")).then(|| AppMenuBar::new(cx));
+        let (disk_stamp, disk_hash) = match &store_path {
+            Some(path) => disk_fingerprint(path),
+            None => (None, None),
+        };
+        let poll_task = store_path.is_some().then(|| {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(EXTERNAL_POLL).await;
+                    if this.update(cx, |this, cx| this.poll_external(cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+        });
 
         let subscriptions = vec![
             cx.subscribe_in(&url_input, window, Self::on_url_event),
@@ -377,6 +447,7 @@ impl Workspace {
         Self {
             focus,
             rail: RailMode::Requests,
+            synced: project.clone(),
             project,
             store_path,
             spec,
@@ -386,6 +457,8 @@ impl Workspace {
             sidebar_visible: true,
             app_menu_bar,
             request_split_ratio: 0.5,
+            sidebar_width: project_sidebar_width,
+            sidebar_drag: None,
             request_split_dragging: false,
             request_split_bounds: Rc::new(Cell::new(None)),
             tabs,
@@ -415,6 +488,11 @@ impl Workspace {
             notice_generation: 0,
             save_task: None,
             notice_task: None,
+            disk_stamp,
+            disk_hash,
+            external_stale: false,
+            active_stale: false,
+            _poll_task: poll_task,
             _subscriptions: subscriptions,
         }
     }
@@ -449,6 +527,19 @@ impl Workspace {
         self.spec.as_deref()
     }
 
+    /// Spec operation `request` is linked to (field popovers, body schema checks).
+    fn schema_link_for(&self, request: &RequestSpec) -> Option<crate::core::schema_hover::SchemaLink> {
+        let spec_ref = request.spec_ref.clone()?;
+        let linked = request.collection_id.as_ref().filter(|id| {
+            self.project.collections.iter().any(|c| &c.id == *id && c.source.is_some())
+        });
+        let spec = match linked {
+            Some(id) => self.linked_specs.get(id)?.clone(),
+            None => self.spec.clone()?,
+        };
+        Some(crate::core::schema_hover::SchemaLink::new(spec, spec_ref))
+    }
+
     /// Collection variables override environment variables for that request.
     fn request_env(&self, request: &RequestSpec) -> Option<Environment> {
         let collection = request
@@ -467,6 +558,24 @@ impl Workspace {
         Some(env)
     }
 
+    /// Second half of an external merge, run on render (inputs need a window).
+    fn reload_external_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let collections = self.project.collections.clone();
+        self.collection_panel
+            .update(cx, |p, cx| p.set_collections(collections, window, cx));
+        let settings = self.project.settings.clone();
+        self.editor.update(cx, |e, cx| {
+            e.set_redirect_defaults(settings.follow_redirects, settings.max_redirects, cx)
+        });
+        self.settings_panel
+            .update(cx, |p, cx| p.set_settings(settings, window, cx));
+        let history = self.project.history.clone();
+        self.history_panel.update(cx, |p, cx| p.set_entries(history, cx));
+        if std::mem::take(&mut self.active_stale) {
+            self.load_active_views(window, cx);
+        }
+    }
+
     pub fn spec_groups(&self) -> &[SpecGroup] {
         self.spec
             .as_ref()
@@ -483,7 +592,12 @@ impl Workspace {
         }
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SAVE_DEBOUNCE).await;
-            this.update(cx, |this, _| this.save_now()).ok();
+            this.update(cx, |this, cx| match this.persist_project() {
+                Ok(true) => this.notify_user(EXTERNAL_NOTICE, cx),
+                Ok(false) => {}
+                Err(e) => eprintln!("rivet: failed to save project: {e}"),
+            })
+            .ok();
         }));
     }
 
@@ -493,13 +607,167 @@ impl Workspace {
         }
     }
 
-    fn persist_project(&mut self) -> Result<(), String> {
+    /// Writes the project. External changes made since the last load/save are
+    /// merged first, so a save never discards them. Returns whether a merge
+    /// happened.
+    fn persist_project(&mut self) -> Result<bool, String> {
+        let merged = self.absorb_external().is_some();
         self.project.open_tabs = self.tabs.iter().map(|t| t.request.clone()).collect();
         self.project.active_tab = self.active_tab;
-        if let Some(path) = &self.store_path {
-            store::save(path, &self.project)?;
+        if let Some(path) = self.store_path.clone() {
+            let text = store::save_text(&path, &self.project)?;
+            self.note_written(&path, &text);
+            self.synced = self.project.clone();
         }
-        Ok(())
+        Ok(merged)
+    }
+
+    /// Remembers what the app just wrote. If the file already differs from it
+    /// (another process wrote in between), the stamp is left unknown so the
+    /// next poll merges that write.
+    fn note_written(&mut self, path: &std::path::Path, text: &str) {
+        let hash = store::content_hash(text.as_bytes());
+        let (stamp, on_disk) = disk_fingerprint(path);
+        self.disk_hash = Some(hash);
+        self.disk_stamp = if on_disk == Some(hash) { stamp } else { None };
+    }
+
+    /// Timer tick: merges project.json if another process changed it.
+    fn poll_external(&mut self, cx: &mut Context<Self>) {
+        let Some(needs_write) = self.absorb_external() else {
+            return;
+        };
+        if needs_write {
+            self.schedule_save(cx);
+        }
+        self.notify_user(EXTERNAL_NOTICE, cx);
+    }
+
+    /// Reads project.json if it changed since the app last loaded or wrote it,
+    /// and merges it into the running workspace. Returns `None` when nothing
+    /// changed, else whether the merged project still differs from the file
+    /// (app-side changes that need a save).
+    fn absorb_external(&mut self) -> Option<bool> {
+        let path = self.store_path.clone()?;
+        let stamp = store::file_stamp(&path)?;
+        if self.disk_stamp == Some(stamp) {
+            return None;
+        }
+        let bytes = std::fs::read(&path).ok()?;
+        let hash = store::content_hash(&bytes);
+        self.disk_stamp = Some(stamp);
+        if self.disk_hash == Some(hash) {
+            return None;
+        }
+        // Unparsable (e.g. written non-atomically, mid-write): wait for the
+        // next change; the stamp is recorded so it isn't re-read every tick.
+        let disk: Project = serde_json::from_slice(&bytes).ok()?;
+        self.disk_hash = Some(hash);
+        let merged = store::merge_projects(&self.synced, &self.project, &disk);
+        let old = std::mem::replace(&mut self.project, merged);
+        self.synced = disk;
+        self.reconcile_external(&old);
+        let mut on_disk = self.synced.clone();
+        on_disk.open_tabs = self.project.open_tabs.clone();
+        on_disk.active_tab = self.project.active_tab;
+        Some(on_disk != self.project)
+    }
+
+    /// Brings UI state in line with a merged project (`old` is the project
+    /// before the merge). Open tabs are kept; a tab without unsaved edits (equal
+    /// to its saved copy) is refreshed from its collection.
+    fn reconcile_external(&mut self, old: &Project) {
+        let envs = self.project.environments.len();
+        self.project.active_env = self.project.active_env.min(envs.saturating_sub(1));
+        let project = &self.project;
+        for (ix, tab) in self.tabs.iter_mut().enumerate() {
+            match find_request(project, &tab.request.id) {
+                Some((collection_id, fresh)) => {
+                    let clean = find_request(old, &tab.request.id)
+                        .is_some_and(|(_, saved)| same_request(saved, &tab.request));
+                    if clean && !same_request(fresh, &tab.request) {
+                        let mut fresh = fresh.clone();
+                        fresh.collection_id = Some(collection_id.to_string());
+                        tab.request = fresh;
+                        self.active_stale |= self.active_tab == Some(ix);
+                    }
+                }
+                None => {
+                    // Its collection was deleted: detach, as delete_collection does.
+                    let gone = tab.request.collection_id.as_ref().is_some_and(|id| {
+                        !project.collections.iter().any(|c| &c.id == id)
+                    });
+                    if gone {
+                        tab.request.collection_id = None;
+                        tab.request.folder = None;
+                        self.active_stale |= self.active_tab == Some(ix);
+                    }
+                }
+            }
+        }
+
+        let exists = |id: &str| project.collections.iter().any(|c| c.id == id);
+        self.collapsed.retain(|key| match key.strip_prefix("col:") {
+            Some(rest) => exists(rest.split(':').next().unwrap_or(rest)),
+            None => true,
+        });
+        if self
+            .collection_delete_confirm
+            .as_deref()
+            .is_some_and(|id| !exists(id))
+        {
+            self.collection_delete_confirm = None;
+        }
+        if matches!(
+            &self.collection_menu,
+            Some(SidebarMenu::Collection(id)) | Some(SidebarMenu::Folder(id, _)) if !exists(id)
+        ) {
+            self.collection_menu = None;
+        }
+        for c in &old.collections {
+            if !project.collections.iter().any(|n| n.id == c.id && n.cookies_enabled) {
+                self.http_sessions.clear(&c.id);
+            }
+        }
+        if old.settings.cookies_enabled && !project.settings.cookies_enabled {
+            self.http_sessions.clear_all();
+        }
+
+        // Linked specs: drop removed/unlinked collections, load new sources.
+        self.linked_specs.retain(|id, _| {
+            project
+                .collections
+                .iter()
+                .any(|c| &c.id == id && c.source.is_some())
+        });
+        for c in &project.collections {
+            let Some(source) = &c.source else { continue };
+            let unchanged = old
+                .collections
+                .iter()
+                .any(|o| o.id == c.id && o.source.as_ref() == Some(source));
+            if !unchanged || !self.linked_specs.contains_key(&c.id) {
+                match Spec::load(source) {
+                    Ok(spec) => {
+                        self.linked_specs.insert(c.id.clone(), Arc::new(spec));
+                    }
+                    Err(_) => {
+                        self.linked_specs.remove(&c.id);
+                    }
+                }
+            }
+        }
+        if project.spec_path != old.spec_path {
+            (self.spec, self.spec_error) = match &project.spec_path {
+                Some(path) => match Spec::load(path) {
+                    Ok(spec) => (Some(Arc::new(spec)), None),
+                    Err(e) => (None, Some(e)),
+                },
+                None => (None, None),
+            };
+        }
+        self.env_panel_stale = true;
+        self.external_stale = true;
     }
 
     pub fn save_project(&mut self, cx: &mut Context<Self>) {
@@ -508,7 +776,7 @@ impl Workspace {
             return;
         }
         match self.persist_project() {
-            Ok(()) => self.notify_user("Проект сохранён", cx),
+            Ok(_) => self.notify_user("Проект сохранён", cx),
             Err(e) => self.notify_user(format!("Не удалось сохранить проект: {e}"), cx),
         }
     }
@@ -537,6 +805,13 @@ impl Workspace {
         self.method_menu_open = false;
         self.tab_menu = None;
         self.confirm_open = false;
+        self.load_active_views(window, cx);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// Loads the active tab into the URL input, editor, WebSocket and response views.
+    fn load_active_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (request, response, last_url, report) = match self.active_tab.and_then(|ix| self.tabs.get(ix)) {
             Some(t) => (t.request.clone(), t.response.clone(), t.last_url.clone(), t.script_report.clone()),
             None => (RequestSpec::untitled(), ResponseState::Empty, None, None),
@@ -549,15 +824,17 @@ impl Workspace {
             self.ws_view
                 .update(cx, |v, cx| v.set_spec(request, window, cx));
         }
-        self.editor
-            .update(cx, |e, cx| e.set_spec(request, window, cx));
+        let link = self.schema_link_for(&request);
+        self.editor.update(cx, |e, cx| {
+            e.set_schema_link(link.clone(), cx);
+            e.set_spec(request, window, cx)
+        });
         self.response.update(cx, |r, cx| {
+            r.set_schema_link(link, cx);
             r.set_base_url(last_url, cx);
             r.set_state(response, cx);
             r.set_script_report(report, cx);
         });
-        self.schedule_save(cx);
-        cx.notify();
     }
 
     fn set_active(&mut self, ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
@@ -704,7 +981,11 @@ impl Workspace {
 
     fn push_request_to_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(r) = self.active().cloned() {
-            self.editor.update(cx, |e, cx| e.set_spec(r, window, cx));
+            let link = self.schema_link_for(&r);
+            self.editor.update(cx, |e, cx| {
+                e.set_schema_link(link, cx);
+                e.set_spec(r, window, cx)
+            });
         }
     }
 
@@ -959,7 +1240,9 @@ impl Workspace {
             if self.active_tab == Some(ix) {
                 let base_url = self.tabs[ix].last_url.clone();
                 let report = self.tabs[ix].script_report.clone();
+                let link = self.schema_link_for(&self.tabs[ix].request);
                 self.response.update(cx, |r, cx| {
+                    r.set_schema_link(link, cx);
                     r.set_base_url(base_url, cx);
                     r.set_state(state, cx);
                     r.set_script_report(report, cx);
@@ -1917,6 +2200,9 @@ impl Render for Workspace {
             let active = self.project.active_env;
             self.env_panel.update(cx, |p, cx| p.set_envs(envs, active, window, cx));
         }
+        if std::mem::take(&mut self.external_stale) {
+            self.reload_external_views(window, cx);
+        }
         // The Browser response mode is a native view drawn above GPUI: hide it
         // whenever GPUI content overlaps it or the response pane is off screen.
         let browser_covered = self.palette.is_some()
@@ -1931,6 +2217,9 @@ impl Render for Workspace {
             || self.active_tab.is_none();
         self.response
             .update(cx, |r, cx| r.set_browser_suppressed(browser_covered, cx));
+        let settings_visible = self.rail == RailMode::Settings;
+        self.settings_panel
+            .update(cx, |p, cx| p.set_visible(settings_visible, cx));
         let p = *cx.palette();
         let content = match self.rail {
             RailMode::Environments => div()
@@ -1973,17 +2262,20 @@ impl Render for Workspace {
             }))
             .on_mouse_move(cx.listener(|this, event, _, cx| {
                 this.move_request_split(event, cx);
+                this.move_sidebar_drag(event, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.stop_request_split(cx);
+                    this.stop_sidebar_drag(cx);
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.stop_request_split(cx);
+                    this.stop_sidebar_drag(cx);
                 }),
             )
             .key_context("Workspace")
@@ -2067,7 +2359,15 @@ impl Render for Workspace {
                             && self.rail != RailMode::Environments
                             && self.rail != RailMode::Collections
                             && self.rail != RailMode::Settings,
-                        |d| d.child(self.render_sidebar(cx)),
+                        |d| {
+                            d.child(self.render_sidebar(cx)).child(
+                                crate::ui::PaneSplitter::new("sidebar-splitter")
+                                    .active(self.sidebar_drag.is_some())
+                                    .on_drag_start(cx.listener(|this, event, _, cx| {
+                                        this.start_sidebar_drag(event, cx)
+                                    })),
+                            )
+                        },
                     )
                     .child(content),
             )

@@ -74,6 +74,59 @@ pm.test("Status is 200", () => pm.response.to.have.status(200));
 ### Интерфейс
 - Тёмная и светлая темы, системное меню на macOS и меню в окне на Windows / Linux, иконка в Dock и в `.exe`.
 
+## MCP
+
+Rivet работает как MCP‑сервер: Claude Code, Claude Desktop, Cursor и другие ИИ‑ассистенты могут смотреть коллекции, отправлять запросы, менять переменные и прогонять коллекции. Сервер — тот же бинарник, режим `rivet mcp` (stdio, JSON‑RPC 2.0), окно не открывается. Он работает с тем же `project.json`, что и приложение (или с файлом из `--project <path>`); открытое окно подхватывает изменения сервера автоматически.
+
+Проще всего подключить из приложения: **Настройки → MCP**. Там:
+- кнопки «Подключить» для Claude Code (через `claude mcp add --scope user`), Claude Desktop и Cursor — Rivet добавляется в конфиг клиента, остальные серверы не меняются, прежний файл сохраняется как `*.bak`; «Копировать» кладёт в буфер команду или JSON; рядом — статус «подключено / не подключено» и путь к исполняемому файлу;
+- переключатели «Разрешить MCP», «Только чтение», «Разрешить отправку запросов», «Показывать секреты ассистенту» — сервер перечитывает их при каждом вызове, перезапуск не нужен;
+- «Активность» — последние вызовы ассистентов (время, инструмент, ✓/✗, кратко что сделано, клиент); журнал лежит рядом с `project.json` в `mcp-activity.jsonl` (последние 500 записей), «Очистить журнал» его удаляет.
+
+Вручную, Claude Code:
+
+```bash
+claude mcp add rivet -- /Applications/Rivet.app/Contents/MacOS/Rivet mcp
+# Windows: claude mcp add rivet -- "C:\Program Files\Rivet\Rivet.exe" mcp
+# другой проект: claude mcp add rivet -- /path/to/rivet mcp --project ~/work/api/project.json
+```
+
+Claude Desktop (`claude_desktop_config.json`), Cursor (`.cursor/mcp.json`) — так же:
+
+```json
+{
+  "mcpServers": {
+    "rivet": {
+      "command": "/Applications/Rivet.app/Contents/MacOS/Rivet",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+| Инструмент | Что делает |
+|---|---|
+| `list_collections` | коллекции: id, связанный файл спецификации, папки, число запросов |
+| `list_requests` | запросы с фильтром по `collection`, `folder`, `query`; `include_spec_endpoints` — операции спецификации проекта |
+| `get_request` | полное описание запроса по id, имени или пути `Коллекция / Папка / Имя` |
+| `save_request` | создать (`collection`, `folder`, `name`, `method`, `url`, `params`, `headers`, `body`, `auth`, `scripts`) или обновить (`id`) запрос |
+| `send_request` | отправить сохранённый (`request_id`) или разовый запрос; `environment`, `follow_redirects`, `timeout_ms`, `max_body_chars`; в ответе статус, заголовки, тело, тайминги, редиректы, тесты, логи скриптов, расхождения со схемой |
+| `get_history` | последние отправки (`limit`, `query`) |
+| `list_environments`, `set_active_environment` | окружения и выбор активного |
+| `get_variables`, `set_variable`, `unset_variable` | переменные окружения или коллекции (`scope`: `environment` / `collection`) |
+| `import_spec` | импорт OpenAPI / Swagger / Postman в новую коллекцию |
+| `run_collection` | прогон коллекции или папки по порядку с передачей переменных между запросами; `stop_on_failure`, `environment`, `delay_ms`; отчёт с тестами и итогами |
+
+Как в приложении, `send_request` и `run_collection` выполняют скрипты, сохраняют переменные, выставленные `pm.environment.set` / `pm.collectionVariables.set`, и пишут историю.
+
+Безопасность:
+- «Разрешить MCP» выключено — `initialize` и `tools/list` работают, но любой вызов инструмента возвращает ошибку «MCP отключён в настройках Rivet».
+- «Только чтение» — `save_request`, `set_variable`, `unset_variable`, `set_active_environment`, `import_spec` отклоняются; `send_request` и `run_collection` выполняются (если разрешена отправка), но не сохраняют историю и переменные из скриптов (в ответе `persisted: false`).
+- «Разрешить отправку запросов» выключено — `send_request` и `run_collection` отклоняются.
+- Значения с секретными ключами (`token`, `password`, `secret`, `apikey`, `api_key`, `Authorization`…) в выдаче заменяются на `••••••••`. Аргумент `reveal_secrets: true` учитывается, только если включено «Показывать секреты ассистенту». Маска, отправленная обратно в `save_request`, сохраняет прежнее значение. Тела ответов и логи скриптов не маскируются.
+- В окружении с флагом **Production** POST / PUT / PATCH / DELETE (и `run_collection` с такими запросами) отклоняются, пока не передан `confirm_production: true` — ассистент должен спросить вас.
+- Каждый вызов читает `project.json` заново и записывает его атомарно; если файл изменился за время вызова, изменения сливаются.
+
 ## Горячие клавиши
 
 | macOS | Windows / Linux | Действие |
@@ -104,11 +157,7 @@ pm.test("Status is 200", () => pm.response.to.have.status(200));
 - `src/core` — без UI: модель данных (`types.rs`), конвейер отправки (`runner.rs`: pre‑скрипт → переменные → HTTP → post‑скрипт), HTTP/1.1 и HTTP/2 (`http/` на hyper + rustls), WebSocket (`ws.rs`), скрипты (`script.rs` + `script_prelude.js` на Boa), переменные (`vars.rs`), cURL, OpenAPI и схемы, импорт Postman, хранилище (`store.rs`), общий Tokio‑рантайм (`rt.rs`).
 - `src/ui` — набор компонентов в стиле дизайна Rivet.
 - `src/app` — главное окно `Workspace` и панели: редактор запроса, ответ, окружения, коллекции, настройки, история, палитра.
-- Ядро не зависит от интерфейса, поэтому тот же `core::runner` используется окном и (в планах) MCP‑сервером.
-
-## В работе
-
-- MCP‑сервер, чтобы ИИ‑ассистенты могли управлять Rivet: запускать запросы, читать ответы, менять переменные.
+- Ядро не зависит от интерфейса, поэтому тот же `core::runner` используется окном и MCP‑сервером (`src/mcp`: протокол и инструменты; `core::collection_run`, `core::project_ops`, `core::import`, `core::secrets` — общие для окна и сервера).
 
 ## Ограничения
 

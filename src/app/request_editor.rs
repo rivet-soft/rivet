@@ -6,17 +6,21 @@
 //! typing into it turns it into a real row and appends a fresh draft.
 
 use std::cell::Cell;
+use std::ops::Range;
 use std::rc::Rc;
 
+use gpui_kit::component::highlighter::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::input::{
-    Editor, EditorState, Input, InputEvent, InputState, RangeDecoration, RangeDecorationCollection,
-    RangeDecorationStyle, TextDecoration, TextDecorationCollection,
+    Editor, EditorState, HoverProvider, Input, InputEvent, InputState, RangeDecoration,
+    RangeDecorationCollection, RangeDecorationStyle, Rope, RopeExt as _, TextDecoration,
+    TextDecorationCollection,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::core::openapi::GeneratedRequestBody;
-use crate::core::types::{Auth, BodyKind, KeyValue, RequestSpec};
+use crate::core::schema_hover::{self, BodySide, FieldInfo, SchemaLink};
+use crate::core::types::{Auth, BodyKind, KeyValue, Mismatch, RequestSpec};
 use crate::theme::{ActivePalette, MONO};
 use crate::ui::{
     BodyModePicker, Button, FormFieldTypePicker, HorizontalPaneSplitter, IconButton, IconName,
@@ -277,6 +281,274 @@ pub fn beautify_json(text: &str) -> Result<String, String> {
     serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
 }
 
+/// Bodies above this size are not checked live (typing stays instant).
+const LIVE_CHECK_LIMIT: usize = 512 * 1024;
+
+/// One live-validation finding in the body editor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BodyProblem {
+    pub range: Range<usize>,
+    pub severity: DiagnosticSeverity,
+    pub message: String,
+}
+
+/// Schema popover state of a JSON editor: the hovered token and what the spec says.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FieldHover {
+    /// Byte range of the hovered key / value (popover anchor).
+    pub range: Range<usize>,
+    pub info: FieldInfo,
+    /// Schema mismatch at this path: (expected, actual).
+    pub mismatch: Option<(String, String)>,
+}
+
+impl FieldHover {
+    /// Field under `offset` of a JSON `text`, described by the linked operation.
+    pub(crate) fn at(
+        link: &SchemaLink,
+        side: BodySide,
+        text: &str,
+        offset: usize,
+        mismatches: &[Mismatch],
+    ) -> Option<Self> {
+        let (range, path) = schema_hover::json_token_at(text, offset)?;
+        if path.is_empty() {
+            return None;
+        }
+        let info = schema_hover::field_info(&link.spec, &link.spec_ref, side, &path)?;
+        let at = schema_hover::path_to_string(&path);
+        let mismatch = mismatches
+            .iter()
+            .find(|m| m.path == at)
+            .map(|m| (m.expected.clone(), m.actual.clone()));
+        Some(Self {
+            range,
+            info,
+            mismatch,
+        })
+    }
+}
+
+/// A [`HoverProvider`] that never answers with LSP content: it only reports the
+/// byte offset under the pointer (after the editor's hover delay) to its owner,
+/// which renders its own styled popover ([`field_hover_card`]). The built-in hover
+/// popover can only show markdown, not the chips of the design.
+pub(crate) struct OffsetHoverProvider {
+    on_hover: Box<OnHoverOffset>,
+}
+
+/// `(editor text, byte offset under the pointer, cx)`.
+type OnHoverOffset = dyn Fn(&str, usize, &mut App);
+
+impl OffsetHoverProvider {
+    pub(crate) fn provider(f: impl Fn(&str, usize, &mut App) + 'static) -> Rc<dyn HoverProvider> {
+        Rc::new(Self {
+            on_hover: Box::new(f),
+        })
+    }
+}
+
+impl HoverProvider for OffsetHoverProvider {
+    fn hover(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Option<lsp_types::Hover>>> {
+        (self.on_hover)(&text.to_string(), offset, cx);
+        Task::ready(Ok(None))
+    }
+}
+
+fn hover_chip(id: &'static str, text: impl Into<SharedString>) -> Stateful<Div> {
+    let text = text.into();
+    div()
+        .id(id)
+        .flex_none()
+        .px(px(6.))
+        .py(px(1.))
+        .rounded(px(4.))
+        .font_family(MONO)
+        .text_size(px(10.5))
+        .aria_label(text.clone())
+        .child(text)
+}
+
+/// The schema popover: name + type / required / location chips + constraints,
+/// description, optional mismatch warning, schema path footer.
+///
+/// Ids: `"field-hover"` (card, labelled with the field name), `"field-hover-type"`,
+/// `"field-hover-required"`, `"field-hover-location"`, `"field-hover-constraints"`,
+/// `"field-hover-description"`, `"field-hover-mismatch"`, `"field-hover-path"`.
+pub(crate) fn field_hover_card(
+    info: &FieldInfo,
+    mismatch: Option<&(String, String)>,
+    p: &crate::theme::Palette,
+) -> AnyElement {
+    let header = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .font_family(MONO)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(12.5))
+                .text_color(p.text)
+                .child(info.name.clone()),
+        )
+        .child(
+            hover_chip("field-hover-type", info.type_label.clone())
+                .bg(p.amber.opacity(0.16))
+                .text_color(p.amber)
+                .test_support(),
+        )
+        .when(info.required, |d| {
+            d.child(
+                hover_chip("field-hover-required", "required")
+                    .border_1()
+                    .border_color(p.danger.opacity(0.6))
+                    .text_color(p.danger)
+                    .test_support(),
+            )
+        })
+        .when_some(info.location.clone(), |d, loc| {
+            d.child(
+                hover_chip("field-hover-location", loc)
+                    .bg(p.teal.opacity(0.14))
+                    .text_color(p.teal)
+                    .test_support(),
+            )
+        })
+        .when(!info.constraints.is_empty(), |d| {
+            let label = info.constraints.join("  ");
+            d.child(div().flex_1().min_w(px(8.))).child(
+                div()
+                    .id("field-hover-constraints")
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.))
+                    .font_family(MONO)
+                    .text_size(px(10.5))
+                    .text_color(p.text_dim)
+                    .aria_label(label)
+                    .children(info.constraints.iter().map(|c| div().child(c.clone())))
+                    .test_support(),
+            )
+        });
+    let description = info.description.clone().map(|text| {
+        div()
+            .id("field-hover-description")
+            .text_size(px(12.))
+            .line_height(px(17.))
+            .text_color(p.text)
+            .aria_label(text.clone())
+            .child(text)
+            .test_support()
+    });
+    let warn = mismatch.map(|(expected, actual)| {
+        let text = format!("Ожидается {expected} · Получено {actual}");
+        div()
+            .id("field-hover-mismatch")
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(8.))
+            .py(px(6.))
+            .rounded(px(6.))
+            .bg(p.warn.opacity(0.10))
+            .border_1()
+            .border_color(p.warn.opacity(0.35))
+            .text_size(px(11.5))
+            .text_color(p.warn)
+            .aria_label(text.clone())
+            .child(icon(IconName::TriangleAlert, 12., p.warn))
+            .child(div().min_w_0().child(text))
+            .test_support()
+    });
+    div()
+        .id("field-hover")
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .w(px(380.))
+        .p(px(12.))
+        .bg(p.surface)
+        .border_1()
+        .border_color(p.border)
+        .rounded(px(10.))
+        .shadow(vec![BoxShadow {
+            color: black().opacity(0.28),
+            offset: point(px(0.), px(8.)),
+            blur_radius: px(24.),
+            spread_radius: px(0.),
+            inset: false,
+        }])
+        .aria_label(info.name.clone())
+        .child(header)
+        .children(description)
+        .children(warn)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .pt(px(8.))
+                .border_t_1()
+                .border_color(p.border)
+                .font_family(MONO)
+                .text_size(px(10.5))
+                .text_color(p.text_dim)
+                .child(
+                    div()
+                        .id("field-hover-path")
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .aria_label(info.schema_path.clone())
+                        .child(info.schema_path.clone())
+                        .test_support(),
+                )
+                .child(div().flex_none().child("из схемы")),
+        )
+        .test_support()
+        .into_any_element()
+}
+
+/// The card floating just under `hover.range` of `editor` (window coordinates), or
+/// nothing while that range is scrolled out of view.
+pub(crate) fn field_hover_overlay(
+    hover: &FieldHover,
+    editor: &Entity<EditorState>,
+    cx: &App,
+) -> Option<AnyElement> {
+    let bounds = editor.read(cx).range_to_bounds(&hover.range)?;
+    let p = *cx.palette();
+    Some(
+        deferred(
+            anchored()
+                .position(point(bounds.left(), bounds.bottom() + px(4.)))
+                .snap_to_window_with_margin(px(8.))
+                .child(field_hover_card(&hover.info, hover.mismatch.as_ref(), &p)),
+        )
+        .with_priority(2)
+        .into_any_element(),
+    )
+}
+
+fn plural_ru(n: usize, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
+    let (m10, m100) = (n % 10, n % 100);
+    if m10 == 1 && m100 != 11 {
+        one
+    } else if (2..=4).contains(&m10) && !(12..=14).contains(&m100) {
+        few
+    } else {
+        many
+    }
+}
+
 pub struct RequestEditor {
     spec: RequestSpec,
     tab: RequestEditorTab,
@@ -289,6 +561,18 @@ pub struct RequestEditor {
     next_row_id: u64,
     body_editor: Entity<EditorState>,
     body_error: Option<String>,
+    /// Operation of a loaded spec this request is linked to (hover info, schema checks).
+    schema_link: Option<SchemaLink>,
+    /// Schema popover of the body field under the pointer.
+    field_hover: Option<FieldHover>,
+    /// Params / Headers key cell under the pointer: (table, row).
+    param_hover: Option<(KvTarget, usize)>,
+    /// Live JSON check of the body: syntax error / schema warnings, in text order.
+    body_problems: Vec<BodyProblem>,
+    /// Schema mismatches behind the warnings (for the hover warn section).
+    body_mismatches: Vec<Mismatch>,
+    /// The body was checked (JSON mode, not blank): the summary line is shown.
+    body_checked: bool,
     /// `{{var}}` highlighting in the body editor: text colour + tinted fill,
     /// and the theme mode they were painted for.
     body_vars: Option<(
@@ -319,6 +603,14 @@ impl EventEmitter<RequestEditorEvent> for RequestEditor {}
 impl RequestEditor {
     pub fn new(spec: RequestSpec, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let body_editor = cx.new(|cx| EditorState::new(window, cx).language("json"));
+        let owner = cx.weak_entity();
+        body_editor.update(cx, |s, _| {
+            s.lsp_mut().hover_provider = Some(OffsetHoverProvider::provider(move |text, offset, cx| {
+                owner
+                    .update(cx, |this, cx| this.hover_body_text(text, offset, cx))
+                    .ok();
+            }));
+        });
         let token = cx.new(|cx| InputState::new(window, cx).placeholder("{{token}}"));
         let username = cx.new(|cx| InputState::new(window, cx).placeholder("Username"));
         let password = cx.new(|cx| {
@@ -340,6 +632,8 @@ impl RequestEditor {
                     this.spec.body.text = state.read(cx).value().to_string();
                     this.highlight_body_vars(cx);
                     this.body_error = None;
+                    this.field_hover = None;
+                    this.refresh_body_diagnostics(cx);
                     cx.emit(RequestEditorEvent::Changed);
                     cx.notify();
                 }
@@ -421,6 +715,12 @@ impl RequestEditor {
             next_row_id: 0,
             body_editor,
             body_error: None,
+            schema_link: None,
+            field_hover: None,
+            param_hover: None,
+            body_problems: Vec::new(),
+            body_mismatches: Vec::new(),
+            body_checked: false,
             body_vars: None,
             auth_kind: AuthKind::None,
             auth_menu_open: false,
@@ -467,6 +767,9 @@ impl RequestEditor {
         self.body_editor
             .update(cx, |s, cx| s.set_value(text, window, cx));
         self.highlight_body_vars(cx);
+        self.field_hover = None;
+        self.param_hover = None;
+        self.refresh_body_diagnostics(cx);
 
         for stage in ScriptStage::ALL {
             let text = stage.script(&self.spec).to_string();
@@ -530,6 +833,8 @@ impl RequestEditor {
         self.spec.body.text = text;
         self.highlight_body_vars(cx);
         self.body_error = None;
+        self.field_hover = None;
+        self.refresh_body_diagnostics(cx);
         cx.emit(RequestEditorEvent::Changed);
         cx.notify();
     }
@@ -650,9 +955,201 @@ impl RequestEditor {
         if self.spec.body.kind != kind {
             self.spec.body.kind = kind;
             self.body_error = None;
+            self.field_hover = None;
+            self.refresh_body_diagnostics(cx);
             cx.emit(RequestEditorEvent::Changed);
         }
         cx.notify();
+    }
+
+    /// Links the request to a spec operation (`None`: not linked). Drives the field
+    /// popovers and the schema warnings of the body.
+    pub fn set_schema_link(&mut self, link: Option<SchemaLink>, cx: &mut Context<Self>) {
+        if self.schema_link == link {
+            return;
+        }
+        self.schema_link = link;
+        self.field_hover = None;
+        self.param_hover = None;
+        self.refresh_body_diagnostics(cx);
+        cx.notify();
+    }
+
+    pub fn schema_link(&self) -> Option<&SchemaLink> {
+        self.schema_link.as_ref()
+    }
+
+    /// The body editor (tests: positions, diagnostics).
+    pub fn body_editor(&self) -> &Entity<EditorState> {
+        &self.body_editor
+    }
+
+    /// Schema info shown for the body field under the pointer.
+    pub fn field_hover(&self) -> Option<&FieldInfo> {
+        self.field_hover.as_ref().map(|h| &h.info)
+    }
+
+    /// Shows the field popover for byte `offset` of the body, as a pointer resting
+    /// there would (tests; the editor's hover provider ends up here too).
+    pub fn hover_body_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let text = self.spec.body.text.clone();
+        self.hover_body_text(&text, offset, cx);
+    }
+
+    fn hover_body_text(&mut self, text: &str, offset: usize, cx: &mut Context<Self>) {
+        let hover = self
+            .schema_link
+            .as_ref()
+            .filter(|_| self.spec.body.kind == BodyKind::Json)
+            .and_then(|link| {
+                FieldHover::at(link, BodySide::Request, text, offset, &self.body_mismatches)
+            });
+        if self.field_hover != hover {
+            self.field_hover = hover;
+            cx.notify();
+        }
+    }
+
+    fn clear_field_hover(&mut self, cx: &mut Context<Self>) {
+        if self.field_hover.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn set_param_hover(&mut self, target: KvTarget, ix: usize, hovered: bool, cx: &mut Context<Self>) {
+        let next = if hovered {
+            Some((target, ix))
+        } else if self.param_hover == Some((target, ix)) {
+            None
+        } else {
+            self.param_hover
+        };
+        if self.param_hover != next {
+            self.param_hover = next;
+            cx.notify();
+        }
+    }
+
+    /// Spec info of the param / header in row `ix` of `target`, if linked and declared.
+    fn param_info(&self, target: KvTarget, ix: usize) -> Option<FieldInfo> {
+        let link = self.schema_link.as_ref()?;
+        let key = target.list(&self.spec).get(ix)?.key.trim();
+        let (spec, r) = (&link.spec, &link.spec_ref);
+        match target {
+            KvTarget::Params => schema_hover::param_info(spec, r, key, "query")
+                .or_else(|| schema_hover::param_info(spec, r, key, "path")),
+            KvTarget::Headers => schema_hover::param_info(spec, r, key, "header"),
+            KvTarget::Form => None,
+        }
+    }
+
+    /// Live findings of the body check (syntax error, schema warnings).
+    pub fn body_problems(&self) -> &[BodyProblem] {
+        &self.body_problems
+    }
+
+    /// Diagnostics currently set on the body editor: (byte range, severity, message).
+    pub fn body_diagnostics(&self, cx: &App) -> Vec<(Range<usize>, DiagnosticSeverity, String)> {
+        self.body_editor
+            .read(cx)
+            .diagnostics()
+            .map(|set| {
+                set.iter()
+                    .map(|d| (d.range.clone(), d.severity, d.message.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Text of the summary line under the body (`None` when hidden).
+    pub fn body_summary(&self) -> Option<String> {
+        if !self.body_checked {
+            return None;
+        }
+        let errors = self
+            .body_problems
+            .iter()
+            .filter(|p| p.severity == DiagnosticSeverity::Error)
+            .count();
+        let warnings = self.body_problems.len() - errors;
+        Some(if errors > 0 {
+            format!("✗ {errors} {}", plural_ru(errors, "ошибка", "ошибки", "ошибок"))
+        } else if warnings > 0 {
+            format!(
+                "⚠ {warnings} {} по схеме",
+                plural_ru(warnings, "предупреждение", "предупреждения", "предупреждений")
+            )
+        } else {
+            "✓ Валидный JSON".to_string()
+        })
+    }
+
+    /// Re-checks a JSON body: syntax (with `{{var}}` masked) and, when linked, the
+    /// request schema. Findings become editor diagnostics (squiggle + hover message).
+    fn refresh_body_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let text = &self.spec.body.text;
+        let checked = self.spec.body.kind == BodyKind::Json
+            && !text.trim().is_empty()
+            && text.len() <= LIVE_CHECK_LIMIT;
+        let mut problems = Vec::new();
+        let mut mismatches = Vec::new();
+        if checked {
+            match schema_hover::check_json(text) {
+                Err(e) => problems.push(BodyProblem {
+                    range: e.range,
+                    severity: DiagnosticSeverity::Error,
+                    message: e.message,
+                }),
+                Ok(Some(value)) => {
+                    if let Some(found) = self.schema_link.as_ref().and_then(|link| {
+                        schema_hover::validate_request_body(&link.spec, &link.spec_ref, &value)
+                    }) {
+                        for m in &found {
+                            let range = schema_hover::parse_path(&m.path)
+                                .and_then(|path| schema_hover::json_path_range(text, &path))
+                                .unwrap_or(0..text.len().min(1));
+                            problems.push(BodyProblem {
+                                range,
+                                severity: DiagnosticSeverity::Warning,
+                                message: format!(
+                                    "{}: ожидается {}, получено {}",
+                                    m.title, m.expected, m.actual
+                                ),
+                            });
+                        }
+                        mismatches = found;
+                    }
+                }
+                Ok(None) => {}
+            }
+        }
+        problems.sort_by_key(|p| p.range.start);
+        self.body_checked = checked;
+        self.body_mismatches = mismatches;
+        self.body_problems = problems.clone();
+        self.body_editor.update(cx, |s, cx| {
+            let rope = s.text().clone();
+            if let Some(set) = s.diagnostics_mut() {
+                set.reset(&rope);
+                for p in problems {
+                    let start = rope.offset_to_position(p.range.start);
+                    let end = rope.offset_to_position(p.range.end);
+                    set.push(Diagnostic::new(start..end, p.message).with_severity(p.severity));
+                }
+            }
+            cx.notify();
+        });
+    }
+
+    /// Summary click: caret to the first problem, editor focused.
+    fn reveal_first_problem(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(start) = self.body_problems.first().map(|p| p.range.start) else {
+            return;
+        };
+        self.body_editor.update(cx, |s, cx| {
+            s.set_selected_range(start..start, cx);
+            s.focus(window, cx);
+        });
     }
 
     /// Byte ranges of `{{var}}` currently highlighted in the body editor.
@@ -717,6 +1214,8 @@ impl RequestEditor {
                         .update(cx, |s, cx| s.set_value(pretty.clone(), window, cx));
                     self.spec.body.text = pretty;
                     self.highlight_body_vars(cx);
+                    self.field_hover = None;
+                    self.refresh_body_diagnostics(cx);
                     cx.emit(RequestEditorEvent::Changed);
                 }
             }
@@ -1188,10 +1687,36 @@ impl RequestEditor {
                 .child(toggle)
                 .child(
                     div()
+                        .id(("key-cell", ix))
                         .flex_1()
                         .min_w_0()
                         .when(!enabled, |d| d.opacity(0.45))
-                        .child(cell(&row.key, "key", true)),
+                        .when(target != KvTarget::Form && !draft, |d| {
+                            d.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                this.set_param_hover(target, ix, *hovered, cx)
+                            }))
+                        })
+                        .child(cell(&row.key, "key", true))
+                        .when_some(
+                            (self.param_hover == Some((target, ix)))
+                                .then(|| self.param_info(target, ix))
+                                .flatten(),
+                            |d, info| {
+                                d.child(
+                                    deferred(
+                                        anchored()
+                                            .snap_to_window_with_margin(px(8.))
+                                            .child(
+                                                div()
+                                                    .mt(px(2.))
+                                                    .child(field_hover_card(&info, None, &p)),
+                                            ),
+                                    )
+                                    .with_priority(2),
+                                )
+                            },
+                        )
+                        .test_support(),
                 )
                 .when(is_multipart, |d| {
                     let view = cx.entity().downgrade();
@@ -1323,14 +1848,67 @@ impl RequestEditor {
                 .min_h_0()
                 .border_t_1()
                 .border_color(p.border)
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if !*hovered {
+                        this.clear_field_hover(cx);
+                    }
+                }))
                 .child(
-                    Editor::new(&self.body_editor)
-                        .appearance(false)
-                        .bordered(false)
-                        .font_family(MONO)
-                        .text_size(px(12.))
-                        .h(relative(1.)),
+                    div().flex_1().min_h_0().child(
+                        Editor::new(&self.body_editor)
+                            .appearance(false)
+                            .bordered(false)
+                            .font_family(MONO)
+                            .text_size(px(12.))
+                            .h(relative(1.)),
+                    ),
                 )
+                .when_some(self.body_summary(), |d, summary| {
+                    let errors = self
+                        .body_problems
+                        .iter()
+                        .any(|p| p.severity == DiagnosticSeverity::Error);
+                    let color = if errors {
+                        p.danger
+                    } else if self.body_problems.is_empty() {
+                        p.online.opacity(0.85)
+                    } else {
+                        p.warn
+                    };
+                    let clickable = !self.body_problems.is_empty();
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .h(px(24.))
+                            .px(px(14.))
+                            .border_t_1()
+                            .border_color(p.border.opacity(0.6))
+                            .child(
+                                div()
+                                    .id("body-validation")
+                                    .text_size(px(11.))
+                                    .text_color(color)
+                                    .aria_label(summary.clone())
+                                    .when(clickable, |d| {
+                                        d.cursor_pointer().hover(|s| s.underline()).on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.reveal_first_problem(window, cx)
+                                            }),
+                                        )
+                                    })
+                                    .child(summary)
+                                    .test_support(),
+                            ),
+                    )
+                })
+                .children(
+                    self.field_hover
+                        .as_ref()
+                        .and_then(|h| field_hover_overlay(h, &self.body_editor, cx)),
+                )
+                .test_support()
                 .into_any_element(),
             BodyKind::Form => self.render_kv(KvTarget::Form, cx).into_any_element(),
             BodyKind::Multipart => div()

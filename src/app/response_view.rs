@@ -44,6 +44,8 @@ use std::time::{Duration, Instant};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use super::request_editor::{FieldHover, OffsetHoverProvider, field_hover_overlay};
+use crate::core::schema_hover::{BodySide, FieldInfo, SchemaLink};
 use crate::core::types::{
     LogLevel, Mismatch, ResponseData, ScriptError, ScriptReport, ScriptStage, SendError, Timings,
 };
@@ -616,6 +618,10 @@ pub struct ResponseView {
     browser_suppressed: bool,
     /// Scripts of the last send (Tests / Console); independent of `state`.
     script_report: Option<ScriptReport>,
+    /// Spec operation of the shown request (field popovers in Pretty).
+    schema_link: Option<SchemaLink>,
+    /// Schema popover of the Pretty field under the pointer.
+    field_hover: Option<FieldHover>,
 }
 
 impl EventEmitter<ResponseViewEvent> for ResponseView {}
@@ -640,6 +646,14 @@ impl ResponseView {
             EditorState::new(window, cx)
                 .language("json")
                 .line_number(true)
+        });
+        let owner = cx.weak_entity();
+        pretty_editor.update(cx, |s, _| {
+            s.lsp_mut().hover_provider = Some(OffsetHoverProvider::provider(move |text, offset, cx| {
+                owner
+                    .update(cx, |this, cx| this.hover_pretty_text(text, offset, cx))
+                    .ok();
+            }));
         });
         let raw_editor = cx.new(|cx| {
             EditorState::new(window, cx)
@@ -666,6 +680,8 @@ impl ResponseView {
             base_url: None,
             browser_suppressed: false,
             script_report: None,
+            schema_link: None,
+            field_hover: None,
             state: ResponseState::Empty,
             prepared: None,
             tab: ResponseTab::Body,
@@ -721,6 +737,7 @@ impl ResponseView {
     }
 
     pub fn set_state(&mut self, state: ResponseState, cx: &mut Context<Self>) {
+        self.field_hover = None;
         self.highlight = None;
         self.copied = None;
         self.prepared = None;
@@ -776,6 +793,48 @@ impl ResponseView {
         }
         self.state = state;
         cx.notify();
+    }
+
+    /// Spec operation of the request whose response is shown (`None`: not linked).
+    pub fn set_schema_link(&mut self, link: Option<SchemaLink>, cx: &mut Context<Self>) {
+        if self.schema_link != link {
+            self.schema_link = link;
+            self.field_hover = None;
+            cx.notify();
+        }
+    }
+
+    /// Schema info shown for the Pretty field under the pointer.
+    pub fn field_hover(&self) -> Option<&FieldInfo> {
+        self.field_hover.as_ref().map(|h| &h.info)
+    }
+
+    /// Shows the field popover for byte `offset` of the Pretty text, as a pointer
+    /// resting there would (tests; the editor's hover provider ends up here too).
+    pub fn hover_pretty_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let text = self.pretty_editor.read(cx).text().to_string();
+        self.hover_pretty_text(&text, offset, cx);
+    }
+
+    fn hover_pretty_text(&mut self, text: &str, offset: usize, cx: &mut Context<Self>) {
+        let hover = match (&self.state, &self.schema_link) {
+            (ResponseState::Done { response, mismatches, .. }, Some(link))
+                if self.pretty_available() =>
+            {
+                FieldHover::at(link, BodySide::Response(response.status), text, offset, mismatches)
+            }
+            _ => None,
+        };
+        if self.field_hover != hover {
+            self.field_hover = hover;
+            cx.notify();
+        }
+    }
+
+    fn clear_field_hover(&mut self, cx: &mut Context<Self>) {
+        if self.field_hover.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// Script results shown in the Tests / Console tabs. Kept across `set_state`.
@@ -1543,9 +1602,21 @@ impl ResponseView {
             );
 
         let code: AnyElement = match self.mode {
-            BodyMode::Pretty if prep.pretty => {
-                self.editor_view("response-pretty", &self.pretty_editor)
-            }
+            BodyMode::Pretty if prep.pretty => div()
+                .id("response-pretty-hover")
+                .size_full()
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if !*hovered {
+                        this.clear_field_hover(cx);
+                    }
+                }))
+                .child(self.editor_view("response-pretty", &self.pretty_editor))
+                .children(
+                    self.field_hover
+                        .as_ref()
+                        .and_then(|h| field_hover_overlay(h, &self.pretty_editor, cx)),
+                )
+                .into_any_element(),
             BodyMode::Pretty => self.editor_view("response-pretty", &self.raw_editor),
             BodyMode::Raw => self.editor_view("response-raw", &self.raw_editor),
             BodyMode::Preview => match &prep.preview {
