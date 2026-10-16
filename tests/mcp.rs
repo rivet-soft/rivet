@@ -189,6 +189,7 @@ fn protocol_basics_and_tool_list() {
         "get_history",
         "list_environments",
         "set_active_environment",
+        "create_environment",
         "get_variables",
         "set_variable",
         "unset_variable",
@@ -382,6 +383,40 @@ fn variables_set_get_unset() {
 }
 
 #[test]
+fn create_environment_with_variables_and_production_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    // No project file yet: the first environment becomes active.
+    let path = dir.path().join("project.json");
+    let mut mcp = Mcp::start(&path);
+
+    let made = mcp.ok("create_environment", json!({"name": "Dev", "variables": {"baseUrl": "http://localhost:3000", "apiToken": "sk-1"}}));
+    assert_eq!((made["active"].as_bool(), made["color"].as_str(), made["variable_count"].as_u64()), (Some(true), Some("green"), Some(2)));
+    let made = mcp.ok("create_environment", json!({
+        "name": "Prod", "production": true,
+        "variables": [{"key": "baseUrl", "value": "https://api.example.com"}, {"key": "debug", "value": "1", "enabled": false}]
+    }));
+    assert_eq!((made["active"].as_bool(), made["color"].as_str()), (Some(false), Some("red")));
+    mcp.ok("create_environment", json!({"name": "Stage", "color": "Blue", "activate": true}));
+
+    let stored = store::load(&path).unwrap();
+    let names: Vec<&str> = stored.environments.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["Dev", "Prod", "Stage"]);
+    assert_eq!(stored.active_env, 2);
+    assert_eq!(stored.environments[0].var("apiToken"), Some("sk-1"));
+    let prod = &stored.environments[1];
+    assert!(prod.production);
+    assert_eq!(prod.var("debug"), None, "disabled variable");
+    assert_eq!(stored.environments[2].color, rivet::core::EnvColor::Blue);
+
+    let vars = mcp.ok("get_variables", json!({"scope": "environment", "name": "Dev"}));
+    assert!(!vars.to_string().contains("sk-1"), "secret masked: {vars}");
+    assert!(mcp.err("create_environment", json!({"name": "dev"})).contains("already exists"));
+    assert!(mcp.err("create_environment", json!({"name": "X", "color": "pink"})).contains("Unknown color"));
+    assert!(mcp.err("create_environment", json!({"name": "  "})).contains("required"));
+    assert!(mcp.err("send_request", json!({"method": "DELETE", "url": "{{baseUrl}}/x", "environment": "Prod"})).contains("production"));
+}
+
+#[test]
 fn run_collection_chains_requests() {
     let base = server();
     let dir = tempfile::tempdir().unwrap();
@@ -456,6 +491,7 @@ fn read_only_refuses_mutations_and_sends_without_persisting() {
         ("set_variable", json!({"scope": "collection", "name": "Shop", "key": "k", "value": "v"})),
         ("unset_variable", json!({"scope": "collection", "name": "Shop", "key": "k"})),
         ("set_active_environment", json!({"name": "Prod"})),
+        ("create_environment", json!({"name": "Blocked"})),
         ("import_spec", json!({"path": "/nope.yaml"})),
     ] {
         let err = mcp.err(tool, args);

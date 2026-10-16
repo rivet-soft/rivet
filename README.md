@@ -112,7 +112,7 @@ Claude Desktop (`claude_desktop_config.json`), Cursor (`.cursor/mcp.json`) — �
 | `save_request` | создать (`collection`, `folder`, `name`, `method`, `url`, `params`, `headers`, `body`, `auth`, `scripts`) или обновить (`id`) запрос |
 | `send_request` | отправить сохранённый (`request_id`) или разовый запрос; `environment`, `follow_redirects`, `timeout_ms`, `max_body_chars`; в ответе статус, заголовки, тело, тайминги, редиректы, тесты, логи скриптов, расхождения со схемой |
 | `get_history` | последние отправки (`limit`, `query`) |
-| `list_environments`, `set_active_environment` | окружения и выбор активного |
+| `list_environments`, `set_active_environment`, `create_environment` | окружения: список, выбор активного, создание (цвет, production, переменные) |
 | `get_variables`, `set_variable`, `unset_variable` | переменные окружения или коллекции (`scope`: `environment` / `collection`) |
 | `import_spec` | импорт OpenAPI / Swagger / Postman в новую коллекцию |
 | `run_collection` | прогон коллекции или папки по порядку с передачей переменных между запросами; `stop_on_failure`, `environment`, `delay_ms`; отчёт с тестами и итогами |
@@ -121,11 +121,24 @@ Claude Desktop (`claude_desktop_config.json`), Cursor (`.cursor/mcp.json`) — �
 
 Безопасность:
 - «Разрешить MCP» выключено — `initialize` и `tools/list` работают, но любой вызов инструмента возвращает ошибку «MCP отключён в настройках Rivet».
-- «Только чтение» — `save_request`, `set_variable`, `unset_variable`, `set_active_environment`, `import_spec` отклоняются; `send_request` и `run_collection` выполняются (если разрешена отправка), но не сохраняют историю и переменные из скриптов (в ответе `persisted: false`).
+- «Только чтение» — `save_request`, `set_variable`, `unset_variable`, `set_active_environment`, `create_environment`, `import_spec` отклоняются; `send_request` и `run_collection` выполняются (если разрешена отправка), но не сохраняют историю и переменные из скриптов (в ответе `persisted: false`).
 - «Разрешить отправку запросов» выключено — `send_request` и `run_collection` отклоняются.
 - Значения с секретными ключами (`token`, `password`, `secret`, `apikey`, `api_key`, `Authorization`…) в выдаче заменяются на `••••••••`. Аргумент `reveal_secrets: true` учитывается, только если включено «Показывать секреты ассистенту». Маска, отправленная обратно в `save_request`, сохраняет прежнее значение. Тела ответов и логи скриптов не маскируются.
 - В окружении с флагом **Production** POST / PUT / PATCH / DELETE (и `run_collection` с такими запросами) отклоняются, пока не передан `confirm_production: true` — ассистент должен спросить вас.
 - Каждый вызов читает `project.json` заново и записывает его атомарно; если файл изменился за время вызова, изменения сливаются.
+
+## Обновления
+
+Rivet сам проверяет [GitHub Releases](https://github.com/rivet-soft/rivet/releases): через 5 секунд после запуска и затем каждые 6 часов (выключается в «Настройки → Обновления → Проверять обновления автоматически»; там же «Проверить сейчас» и текущая версия).
+
+- Кнопка обновлений — в левой панели над «Настройками». Синяя точка — доступна новая версия, индикатор загрузки — идёт скачивание, зелёная точка — версия скачана и готова к установке, красная — ошибка.
+- По клику открывается окно с номером версии, датой и описанием изменений. «Скачать» загружает архив для вашей системы и сверяет его SHA‑256 с файлом `SHA256SUMS` из релиза; при несовпадении файл удаляется. «Пропустить эту версию» убирает индикатор до следующего релиза, «Открыть страницу релиза» — ссылка на GitHub.
+- «Перезапустить и обновить» сохраняет проект, заменяет файлы приложения и запускает новую версию. Старые файлы остаются рядом (`Rivet.app.old-<версия>`, `Rivet.exe.old`, `rivet.old`) и удаляются при следующем запуске.
+  - macOS: заменяется весь `Rivet.app`. Автообновление работает, только если Rivet лежит в обычной папке (например, «Программы») — при запуске прямо из образа DMG или из временной копии macOS (App Translocation) сначала перетащите Rivet.app в «Программы».
+  - Windows: обновляются `Rivet.exe`, `WebView2Loader.dll` и `examples` в папке, откуда запущен Rivet.
+  - Linux: заменяется бинарник `rivet` и файлы рядом с ним из архива.
+- Нужны права на запись в папку приложения. Если их нет (например, Rivet установлен в системный каталог), обновитесь вручную: скачайте архив со [страницы последнего релиза](https://github.com/rivet-soft/rivet/releases/latest), проверьте при желании `sha256sum -c SHA256SUMS --ignore-missing` и замените файлы — проект и настройки хранятся отдельно и не пострадают.
+- Локальные сборки (версия `…-dev`, запуск из `target/`) не обновляются: кнопка видна, но неактивна.
 
 ## Горячие клавиши
 
@@ -154,7 +167,7 @@ Claude Desktop (`claude_desktop_config.json`), Cursor (`.cursor/mcp.json`) — �
 
 ## Устройство
 
-- `src/core` — без UI: модель данных (`types.rs`), конвейер отправки (`runner.rs`: pre‑скрипт → переменные → HTTP → post‑скрипт), HTTP/1.1 и HTTP/2 (`http/` на hyper + rustls), WebSocket (`ws.rs`), скрипты (`script.rs` + `script_prelude.js` на Boa), переменные (`vars.rs`), cURL, OpenAPI и схемы, импорт Postman, хранилище (`store.rs`), общий Tokio‑рантайм (`rt.rs`).
+- `src/core` — без UI: модель данных (`types.rs`), конвейер отправки (`runner.rs`: pre‑скрипт → переменные → HTTP → post‑скрипт), HTTP/1.1 и HTTP/2 (`http/` на hyper + rustls), WebSocket (`ws.rs`), скрипты (`script.rs` + `script_prelude.js` на Boa), переменные (`vars.rs`), cURL, OpenAPI и схемы, импорт Postman, хранилище (`store.rs`), общий Tokio‑рантайм (`rt.rs`), самообновление (`update.rs`; интерфейс — `src/app/update_ui.rs`).
 - `src/ui` — набор компонентов в стиле дизайна Rivet.
 - `src/app` — главное окно `Workspace` и панели: редактор запроса, ответ, окружения, коллекции, настройки, история, палитра.
 - Ядро не зависит от интерфейса, поэтому тот же `core::runner` используется окном и MCP‑сервером (`src/mcp`: протокол и инструменты; `core::collection_run`, `core::project_ops`, `core::import`, `core::secrets` — общие для окна и сервера).
@@ -166,7 +179,3 @@ Claude Desktop (`claude_desktop_config.json`), Cursor (`.cursor/mcp.json`) — �
 - Время в истории показывается в UTC.
 - Скрипты: нет `pm.sendRequest`, `require`/CryptoJS и скриптов уровня коллекции.
 - Postman `formdata` и бинарные тела импортируются; файлы, на которые ссылается коллекция, должны быть доступны на диске.
-
-## Скриншот для README
-
-Картинка в начале берётся из `docs/screenshot.png`. Чтобы обновить: откройте Rivet, нажмите ⌘⇧4, затем Пробел и кликните по окну — сохраните файл как `docs/screenshot.png`.

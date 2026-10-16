@@ -86,6 +86,14 @@ fn main() {
     if let Some(code) = cli(&args) {
         std::process::exit(code);
     }
+    // Backups left by the previous self-update (`Rivet.app.old-*`, `*.old`).
+    // A short delay lets the old process finish exiting so its files unlock.
+    if !rivet::core::update::is_dev_build() {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            rivet::core::update::cleanup_leftovers();
+        });
+    }
     gpui_kit::application()
         .with_assets(rivet::assets::RelayAssets)
         .run(|cx| {

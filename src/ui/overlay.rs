@@ -28,6 +28,10 @@ pub enum Placement {
     BelowEnd,
     /// Over the trigger, right edges aligned.
     AboveEnd,
+    /// Right of the trigger, top edges aligned (grows down).
+    Right,
+    /// Right of the trigger, bottom edges aligned (grows up).
+    RightEnd,
 }
 
 /// Per-element state kept across frames: focus for Escape handling, plus the
@@ -158,8 +162,11 @@ impl RenderOnce for Popover {
             Placement::BelowEnd => (Anchor::TopRight, true),
             Placement::Above => (Anchor::BottomLeft, false),
             Placement::AboveEnd => (Anchor::BottomRight, false),
+            Placement::Right => (Anchor::TopLeft, true),
+            Placement::RightEnd => (Anchor::BottomLeft, false),
         };
         let end = matches!(self.placement, Placement::BelowEnd | Placement::AboveEnd);
+        let side = matches!(self.placement, Placement::Right | Placement::RightEnd);
 
         let panel = self.open.then(|| {
             let dismiss_out = self.on_dismiss.clone();
@@ -172,8 +179,9 @@ impl RenderOnce for Popover {
                 .flex()
                 .flex_col()
                 .when_some(self.width, |s, w| s.w(w))
-                .when(below, |s| s.mt(self.gap))
-                .when(!below, |s| s.mb(self.gap))
+                .when(side, |s| s.ml(self.gap))
+                .when(below && !side, |s| s.mt(self.gap))
+                .when(!below && !side, |s| s.mb(self.gap))
                 .bg(p.surface)
                 .border_1()
                 .border_color(p.border)
@@ -211,10 +219,13 @@ impl RenderOnce for Popover {
             // its origin; the anchor corner then decides which way the panel grows.
             div()
                 .absolute()
-                .when(below, |s| s.top_full())
-                .when(!below, |s| s.bottom_full())
-                .when(end, |s| s.right_0())
-                .when(!end, |s| s.left_0())
+                .when(side, |s| s.left_full())
+                .when(side && below, |s| s.top_0())
+                .when(side && !below, |s| s.bottom_0())
+                .when(!side && below, |s| s.top_full())
+                .when(!side && !below, |s| s.bottom_full())
+                .when(!side && end, |s| s.right_0())
+                .when(!side && !end, |s| s.left_0())
                 .child(
                     deferred(anchored().anchor(corner).snap_to_window().child(panel)).priority(1),
                 )

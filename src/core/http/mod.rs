@@ -46,6 +46,10 @@ use hop::{HopRequest, run_hop};
 /// Responses larger than this are truncated.
 pub const MAX_BODY_BYTES: usize = 50 * 1024 * 1024;
 
+/// Download progress callback: `(body bytes read, Content-Length or 0)`.
+/// Called from the networking runtime for the final response's body.
+pub type Progress = Arc<dyn Fn(u64, u64) + Send + Sync>;
+
 /// Cooperative cancellation flag shared between the UI and a running request.
 #[derive(Clone, Debug, Default)]
 pub struct CancelToken(Arc<AtomicBool>);
@@ -190,6 +194,7 @@ async fn run(
     cancel: &CancelToken,
     host: &str,
     jar: &Mutex<CookieStore>,
+    progress: Option<&Progress>,
 ) -> Result<ResponseData, SendError> {
     let timeout_ms = settings.timeout_ms;
     let chain_start = Instant::now();
@@ -233,6 +238,7 @@ async fn run(
             url: &url,
             headers: &headers,
             body: body.as_deref(),
+            progress,
         };
         let exchange = run_hop(
             &hop_request,
@@ -322,7 +328,17 @@ pub fn execute(
     settings: &Settings,
     cancel: &CancelToken,
 ) -> Result<ResponseData, SendError> {
-    execute_with_jar(req, settings, cancel, Jar::default())
+    execute_with_jar(req, settings, cancel, Jar::default(), None)
+}
+
+/// [`execute`] that reports the response body's download progress.
+pub fn execute_with_progress(
+    req: &ResolvedRequest,
+    settings: &Settings,
+    cancel: &CancelToken,
+    progress: Progress,
+) -> Result<ResponseData, SendError> {
+    execute_with_jar(req, settings, cancel, Jar::default(), Some(progress))
 }
 
 /// Sends using a shared cookie jar when `cookie_scope` is supplied.
@@ -335,7 +351,7 @@ pub fn execute_scoped(
     cookie_scope: Option<&str>,
 ) -> Result<ResponseData, SendError> {
     let jar = cookie_scope.map(|id| sessions.get(id)).unwrap_or_default();
-    execute_with_jar(req, settings, cancel, jar)
+    execute_with_jar(req, settings, cancel, jar, None)
 }
 
 fn execute_with_jar(
@@ -343,6 +359,7 @@ fn execute_with_jar(
     settings: &Settings,
     cancel: &CancelToken,
     jar: Jar,
+    progress: Option<Progress>,
 ) -> Result<ResponseData, SendError> {
     if cancel.is_cancelled() {
         return Err(SendError::Cancelled);
@@ -353,7 +370,8 @@ fn execute_with_jar(
         let (req, settings, cancel, worker_host) =
             (req.clone(), settings.clone(), cancel.clone(), host.clone());
         rt::spawn(async move {
-            let result = run(&req, &settings, &cancel, &worker_host, &jar).await;
+            let result =
+                run(&req, &settings, &cancel, &worker_host, &jar, progress.as_ref()).await;
             let _ = tx.send(result);
         })
     };

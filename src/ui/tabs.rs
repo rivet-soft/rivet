@@ -15,6 +15,7 @@ pub struct Tab {
     method: Option<Method>,
     active: bool,
     dirty: bool,
+    busy: bool,
     on_click: Option<ClickHandler>,
     on_close: Option<ClickHandler>,
     menu_open: bool,
@@ -32,6 +33,7 @@ impl Tab {
             method: None,
             active: false,
             dirty: false,
+            busy: false,
             on_click: None,
             on_close: None,
             menu_open: false,
@@ -52,8 +54,16 @@ impl Tab {
         self
     }
 
+    /// Unsaved changes: a dot next to the close button (like Postman).
     pub fn dirty(mut self, dirty: bool) -> Self {
         self.dirty = dirty;
+        self
+    }
+
+    /// Work in progress (request sending, WebSocket open): a small spinner,
+    /// shown instead of the unsaved dot.
+    pub fn busy(mut self, busy: bool) -> Self {
+        self.busy = busy;
         self
     }
 
@@ -166,8 +176,27 @@ impl RenderOnce for Tab {
                     .w(px(20.))
                     .flex()
                     .justify_center()
-                    .when(self.dirty, |s| {
-                        s.child(div().size(px(6.)).rounded_full().bg(p.text_dim))
+                    .when(self.busy, |s| {
+                        s.child(
+                            super::Spinner::new(ElementId::NamedChild(
+                                std::sync::Arc::new(close_id.clone()),
+                                "busy".into(),
+                            ))
+                            .size(11.),
+                        )
+                    })
+                    .when(self.dirty && !self.busy, |s| {
+                        s.child(
+                            div()
+                                .id(ElementId::NamedChild(
+                                    std::sync::Arc::new(close_id.clone()),
+                                    "dirty".into(),
+                                ))
+                                .size(px(7.))
+                                .rounded_full()
+                                .bg(p.text)
+                                .test_support(),
+                        )
                     })
                     .when_some(self.on_close, |s, f| {
                         let btn = IconButton::new(close_id, IconName::X)

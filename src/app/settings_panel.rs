@@ -43,6 +43,10 @@ pub struct SettingsPanel {
     pub confirm_install: Option<McpClient>,
     /// Client whose installer is running.
     pub installing: Option<McpClient>,
+    /// Self-update status line (from the workspace) and whether updates work
+    /// in this build.
+    pub update_status: SharedString,
+    updates_enabled: bool,
     visible: bool,
     notice_generation: u64,
     _activity_task: Option<Task<()>>,
@@ -57,6 +61,11 @@ pub enum SettingsPanelEvent {
     Changed(Settings),
 }
 impl EventEmitter<SettingsPanelEvent> for SettingsPanel {}
+
+/// «Проверить сейчас» in Settings → Обновления.
+#[derive(Clone, Copy, Debug)]
+pub struct CheckForUpdates;
+impl EventEmitter<CheckForUpdates> for SettingsPanel {}
 
 impl SettingsPanel {
     pub fn new(
@@ -127,6 +136,8 @@ impl SettingsPanel {
             notice: None,
             confirm_install: None,
             installing: None,
+            update_status: "".into(),
+            updates_enabled: false,
             visible: false,
             notice_generation: 0,
             _activity_task: None,
@@ -139,6 +150,18 @@ impl SettingsPanel {
 
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    pub fn set_update_status(&mut self, text: impl Into<SharedString>, enabled: bool, cx: &mut Context<Self>) {
+        self.update_status = text.into();
+        self.updates_enabled = enabled;
+        cx.notify();
+    }
+
+    /// Keeps the panel's copy in sync when the workspace skips a release, so
+    /// the next `Changed` doesn't revert it.
+    pub fn set_skipped_version(&mut self, version: Option<String>) {
+        self.settings.skipped_version = version;
     }
 
     /// The project file whose sibling `mcp-activity.jsonl` is shown.
@@ -586,6 +609,84 @@ impl SettingsPanel {
     }
 }
 
+impl SettingsPanel {
+    fn render_updates(&self, cx: &mut Context<Self>) -> Div {
+        let p = *cx.palette();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .pt(px(16.))
+            .border_t_1()
+            .border_color(p.border)
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Обновления"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(20.))
+                    .child(
+                        div()
+                            .w(px(260.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(div().text_size(px(13.)).child("Проверять обновления автоматически"))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(p.text_dim)
+                                    .child("При запуске и каждые 6 часов, через GitHub Releases"),
+                            ),
+                    )
+                    .child(
+                        Button::new("settings-auto-update", on_off(self.settings.auto_update)).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.auto_update = !this.settings.auto_update;
+                                cx.emit(SettingsPanelEvent::Changed(this.settings.clone()));
+                                cx.notify();
+                            }),
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(20.))
+                    .child(
+                        div()
+                            .w(px(260.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .child(format!("Текущая версия: {}", env!("RIVET_VERSION"))),
+                            )
+                            .child(
+                                div()
+                                    .id("settings-update-status")
+                                    .text_size(px(11.))
+                                    .text_color(p.text_dim)
+                                    .child(self.update_status.clone()),
+                            ),
+                    )
+                    .child(
+                        Button::new("settings-check-updates", "Проверить сейчас")
+                            .disabled(!self.updates_enabled)
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(CheckForUpdates))),
+                    ),
+            )
+    }
+}
+
 impl Render for SettingsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = *cx.palette();
@@ -779,6 +880,7 @@ impl Render for SettingsPanel {
                     ),
             )
             .child(self.render_mcp(cx))
+            .child(self.render_updates(cx))
             .child(
                 div()
                     .pt(px(16.))

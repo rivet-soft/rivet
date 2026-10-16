@@ -19,6 +19,7 @@ pub mod script;
 pub mod secrets;
 pub mod store;
 pub mod types;
+pub mod update;
 pub mod vars;
 pub mod ws;
 

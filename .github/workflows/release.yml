@@ -111,6 +111,16 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # The in-app updater verifies the downloaded package against this file.
+      - name: Checksums (SHA256SUMS)
+        shell: bash
+        run: |
+          cd dist
+          files=$(find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
+          [ -n "$files" ] || { echo "::error::dist is empty"; exit 1; }
+          sha256sum $files > ../SHA256SUMS
+          mv ../SHA256SUMS SHA256SUMS
+          cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           name: Rivet ${{ needs.meta.outputs.version }}

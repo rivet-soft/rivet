@@ -17,7 +17,8 @@ gpui_kit::assets::icon_assets!(
         Layers,
         RotateCcwClock,
         RotateCcw,
-        Bookmark
+        Bookmark,
+        CircleArrowDown
     ]
 );
 

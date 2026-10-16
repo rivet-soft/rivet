@@ -180,6 +180,7 @@ impl Workspace {
                     )
             }))
             .child(div().flex_1())
+            .child(self.render_update_rail_item(cx))
             .child(
                 RailItem::new("rail-settings", IconName::Settings, "Настройки")
                     .active(self.rail == RailMode::Settings)

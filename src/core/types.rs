@@ -348,6 +348,12 @@ pub struct Settings {
     /// What AI assistants may do through `rivet mcp` (Settings → MCP).
     #[serde(default)]
     pub mcp: McpSettings,
+    /// Check GitHub for a new Rivet release on start and every 6 hours.
+    #[serde(default = "yes")]
+    pub auto_update: bool,
+    /// Release the user chose to skip ("Пропустить эту версию"), e.g. `1.4.0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_version: Option<String>,
 }
 
 /// Permissions of the MCP server (`rivet mcp`), edited in Settings → MCP and
@@ -405,6 +411,8 @@ impl Default for Settings {
             mock_server: None,
             http_version: HttpVersionPref::Auto,
             mcp: McpSettings::default(),
+            auto_update: true,
+            skipped_version: None,
         }
     }
 }

@@ -1106,3 +1106,59 @@ fn stored_sidebar_width_is_restored(cx: &mut TestAppContext) {
         let _ = cx;
     });
 }
+
+#[gpui_kit::test]
+fn unsaved_dot_and_close_prompt(cx: &mut TestAppContext) {
+    let (view, window) = open(cx);
+    // A request saved in a collection, opened in a tab, is clean.
+    window.update(|w, cx| w.press("cmd-s", cx));
+    let saved = view.read_with(window, |v, _| v.project.collections[0].requests.len());
+    if saved == 0 {
+        // First save goes through the "save to collection" dialog in this build;
+        // save programmatically instead.
+        view.update(window, |v, cx| {
+            let r = v.active().unwrap().clone();
+            v.project.collections[0].requests.push(r);
+            cx.notify();
+        });
+    }
+    let dirty_dot = |w: &mut gpui_kit::Window| {
+        w.try_find(gpui_kit::ElementId::NamedChild(
+            std::sync::Arc::new(gpui_kit::ElementId::NamedChild(
+                std::sync::Arc::new(("tab", 0usize).into()),
+                "close".into(),
+            )),
+            "dirty".into(),
+        ))
+        .is_some()
+    };
+    window.update(|w, cx| w.render_frame(cx));
+    assert!(!view.read_with(window, |v, _| v.tab_unsaved(0)));
+    window.update(|w, _| assert!(!dirty_dot(w)));
+
+    // Editing the URL marks the tab unsaved and shows the dot.
+    window.update(|w, cx| {
+        w.click("url", cx);
+        w.press("cmd-a", cx);
+        w.input("https://example.com/changed", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    assert!(view.read_with(window, |v, _| v.tab_unsaved(0)));
+    window.update(|w, _| assert!(dirty_dot(w)));
+
+    // Closing asks; Cancel keeps the tab, "Не сохранять" closes it.
+    let tabs = view.read_with(window, |v, _| v.tabs.len());
+    window.update(|w, cx| w.press("cmd-w", cx));
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("close-confirm").is_some());
+        w.click("close-confirm-cancel", cx);
+    });
+    assert_eq!(view.read_with(window, |v, _| v.tabs.len()), tabs);
+    window.update(|w, cx| w.press("cmd-w", cx));
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.click("close-confirm-discard", cx);
+    });
+    assert_eq!(view.read_with(window, |v, _| v.tabs.len()), tabs - 1);
+}

@@ -13,7 +13,7 @@ use crate::core::project_ops::{self, find_collection, find_env, find_request, is
 use crate::core::mcp_activity::{self, ActivityEntry};
 use crate::core::secrets;
 use crate::core::{
-    Collection, Environment, KeyValue, McpSettings, Project, RequestSpec, import, runner, store,
+    Collection, EnvColor, Environment, KeyValue, McpSettings, Project, RequestSpec, import, runner, store,
 };
 
 /// Default cap for response bodies returned to the model.
@@ -47,7 +47,8 @@ pub struct Server {
 pub const DISABLED_MESSAGE: &str = "MCP отключён в настройках Rivet (Настройки → MCP)";
 
 /// Tools that change the project.
-const MUTATING_TOOLS: [&str; 5] = ["save_request", "set_variable", "unset_variable", "set_active_environment", "import_spec"];
+const MUTATING_TOOLS: [&str; 6] =
+    ["save_request", "set_variable", "unset_variable", "set_active_environment", "create_environment", "import_spec"];
 /// Tools that send HTTP requests.
 const SENDING_TOOLS: [&str; 2] = ["send_request", "run_collection"];
 
@@ -214,6 +215,29 @@ pub fn definitions() -> Vec<Value> {
             false,
         ),
         tool(
+            "create_environment",
+            "Create environment",
+            "Create an environment (e.g. Dev, Stage, Prod) with optional variables such as baseUrl and token. Mark it production to require confirm_production for destructive requests.",
+            json!({
+                "name": {"type": "string", "description": "Environment name; must not match an existing one"},
+                "color": {"type": "string", "enum": ["green", "red", "amber", "blue", "purple"], "description": "Dot color in the app (default: red for production, green otherwise)"},
+                "production": {"type": "boolean", "description": "Destructive requests (POST/PUT/PATCH/DELETE) then need confirm_production: true. Default false"},
+                "variables": {
+                    "description": "Variables: array of {key, value, enabled?, description?} or an object {\"name\": \"value\"}",
+                    "anyOf": [
+                        {"type": "array", "items": {"type": "object", "properties": {
+                            "key": {"type": "string"}, "value": {"type": "string"},
+                            "enabled": {"type": "boolean"}, "description": {"type": "string"}
+                        }, "required": ["key"]}},
+                        {"type": "object", "additionalProperties": {"type": "string"}}
+                    ]
+                },
+                "activate": {"type": "boolean", "description": "Make it the active environment (default false; the first environment is always active)"}
+            }),
+            &["name"],
+            false,
+        ),
+        tool(
             "get_variables",
             "Get variables",
             "Variables of an environment or a collection. Collection variables override environment ones when requests resolve {{vars}}.",
@@ -279,6 +303,7 @@ pub fn tool_names() -> &'static [&'static str] {
         "get_history",
         "list_environments",
         "set_active_environment",
+        "create_environment",
         "get_variables",
         "set_variable",
         "unset_variable",
@@ -374,6 +399,7 @@ impl Server {
             "get_history" => self.get_history(&args),
             "list_environments" => self.list_environments(),
             "set_active_environment" => self.set_active_environment(&args),
+            "create_environment" => self.create_environment(&args),
             "get_variables" => self.get_variables(&args),
             "set_variable" => self.set_variable(&args, true),
             "unset_variable" => self.set_variable(&args, false),
@@ -761,6 +787,44 @@ impl Server {
         Ok(json!({"active": env.name, "id": env.id, "production": env.production}).into())
     }
 
+    fn create_environment(&self, args: &Args) -> ToolResult {
+        let base = self.load()?;
+        let mut project = base.clone();
+        let name = args.req_str("name")?.trim();
+        if project.environments.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
+            return Err(format!("Environment '{name}' already exists; use set_variable to change its variables"));
+        }
+        let production = args.flag("production")?;
+        let color = match args.str("color")? {
+            None => if production { EnvColor::Red } else { EnvColor::Green },
+            Some(c) => serde_json::from_value(json!(c.trim().to_lowercase()))
+                .map_err(|_| format!("Unknown color '{c}'; use green, red, amber, blue or purple"))?,
+        };
+        let mut env = Environment::new(name, color);
+        env.production = production;
+        if let Some(vars) = args.get("variables") {
+            env.vars = args::key_values(vars, "variables")?;
+            env.vars.iter_mut().for_each(|v| v.file = false);
+        }
+        let (id, variable_count) = (env.id.clone(), env.vars.len());
+        project.environments.push(env);
+        let ix = project.environments.len() - 1;
+        if args.flag("activate")? || project.environments.get(project.active_env).is_none() {
+            project.active_env = ix;
+        }
+        let active = project.active_env == ix;
+        self.save(&base, &project)?;
+        Ok(json!({
+            "id": id,
+            "name": name,
+            "production": production,
+            "color": color,
+            "variable_count": variable_count,
+            "active": active,
+        })
+        .into())
+    }
+
     /// Variables of the scope named by `scope`/`name`.
     fn scope_vars<'p>(project: &'p mut Project, args: &Args) -> Result<(String, String, &'p mut Vec<KeyValue>), String> {
         match args.req_str("scope")? {
@@ -972,6 +1036,12 @@ fn summarize(name: &str, v: &Value) -> String {
         "get_history" => format!("записей: {}", count("entries")),
         "list_environments" => format!("окружений: {}", count("environments")),
         "set_active_environment" => format!("активно: {}", text(&v["active"])),
+        "create_environment" => format!(
+            "{}{} (переменных: {})",
+            text(&v["name"]),
+            if v["production"].as_bool() == Some(true) { ", production" } else { "" },
+            v["variable_count"].as_u64().unwrap_or(0)
+        ),
         "get_variables" => format!("{} {}: переменных {}", text(&v["scope"]), text(&v["name"]), count("variables")),
         "set_variable" | "unset_variable" => format!("{} {}: {} {}", text(&v["scope"]), text(&v["name"]), text(&v["key"]), text(&v["action"])),
         "import_spec" => format!("{} (запросов: {})", text(&v["collection"]), v["request_count"].as_u64().unwrap_or(0)),

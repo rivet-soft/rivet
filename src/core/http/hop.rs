@@ -21,6 +21,8 @@ pub(super) struct HopRequest<'a> {
     pub url: &'a str,
     pub headers: &'a [(String, String)],
     pub body: Option<&'a [u8]>,
+    /// Reports body bytes read so far and the `Content-Length` (0 if unknown).
+    pub progress: Option<&'a super::Progress>,
 }
 
 pub(super) struct HopResponse {
@@ -327,11 +329,17 @@ pub(super) async fn run_hop(
 
     let mut body = Vec::new();
     if hop.method != Method::Head && !followed {
+        let expected = header_value(&headers, "content-length")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0);
         while let Some(frame) = incoming.frame().await {
             let frame = frame.map_err(err)?;
             if let Ok(data) = frame.into_data() {
                 let take = data.len().min(MAX_BODY_BYTES - body.len());
                 body.extend_from_slice(&data[..take]);
+                if let Some(progress) = hop.progress {
+                    progress(body.len() as u64, expected);
+                }
                 if body.len() >= MAX_BODY_BYTES {
                     break;
                 }

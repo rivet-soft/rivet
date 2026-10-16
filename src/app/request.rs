@@ -132,7 +132,8 @@ impl Workspace {
                 let tab = Tab::new(("tab", ix), label);
                 let tab = if is_ws { tab } else { tab.method(t.request.method) };
                 tab.active(self.active_tab == Some(ix))
-                    .dirty(t.is_sending() || (is_ws && ws_view.is_live(&t.request.id)))
+                    .dirty(self.tab_unsaved(ix))
+                    .busy(t.is_sending() || (is_ws && ws_view.is_live(&t.request.id)))
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.activate_tab(ix, window, cx)),
                     )
@@ -711,5 +712,71 @@ impl Workspace {
                     .test_support(),
             )
             .into_any_element()
+    }
+}
+
+impl Workspace {
+    /// Modal "save changes?" prompt for closing a tab with unsaved edits.
+    pub(super) fn render_close_confirm(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let p = *cx.palette();
+        let name = self
+            .tabs
+            .get(ix)
+            .map(|t| if t.request.name.trim().is_empty() { "Untitled".to_string() } else { t.request.name.clone() })
+            .unwrap_or_default();
+        let choice = |c: super::CloseChoice| {
+            cx.listener(move |this, _, window, cx| this.resolve_close_confirm(c, window, cx))
+        };
+        deferred(
+            div()
+                .id("close-confirm-backdrop")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_start()
+                .justify_center()
+                .pt(px(140.))
+                .bg(gpui_kit::black().opacity(0.35))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                    this.resolve_close_confirm(super::CloseChoice::Cancel, window, cx)
+                }))
+                .child(
+                    div()
+                        .id("close-confirm")
+                        .w(px(420.))
+                        .p(px(18.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .rounded(px(12.))
+                        .bg(p.surface)
+                        .border_1()
+                        .border_color(p.border)
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(format!("Сохранить изменения в «{name}»?")),
+                        )
+                        .child(div().text_color(p.text_dim).child(
+                            "Если не сохранить, изменения в этой вкладке будут потеряны.",
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(8.))
+                                .pt(px(6.))
+                                .child(Button::new("close-confirm-cancel", "Отмена").ghost().on_click(choice(super::CloseChoice::Cancel)))
+                                .child(Button::new("close-confirm-discard", "Не сохранять").on_click(choice(super::CloseChoice::Discard)))
+                                .child(Button::new("close-confirm-save", "Сохранить").primary().on_click(choice(super::CloseChoice::Save))),
+                        )
+                        .test_support(),
+                ),
+        )
+        .with_priority(2)
+        .into_any_element()
     }
 }

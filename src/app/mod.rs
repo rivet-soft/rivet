@@ -18,6 +18,7 @@ pub mod settings_panel;
 mod sidebar;
 mod statusbar;
 mod titlebar;
+pub mod update_ui;
 pub mod ws_view;
 
 use std::cell::Cell;
@@ -39,7 +40,8 @@ use self::history_panel::{HistoryPanel, HistoryPanelEvent};
 use self::palette::{CommandPalette, PaletteEvent, PaletteItem};
 use self::request_editor::{RequestEditor, RequestEditorEvent};
 use self::response_view::{ResponseState, ResponseView, ResponseViewEvent};
-use self::settings_panel::{SettingsPanel, SettingsPanelEvent};
+use self::settings_panel::{CheckForUpdates, SettingsPanel, SettingsPanelEvent};
+pub use self::update_ui::{UpdateHooks, UpdateState};
 use self::ws_view::{WsView, WsViewEvent};
 use crate::core::openapi::Spec;
 use crate::core::postman::{self, PostmanImport};
@@ -200,6 +202,14 @@ fn request_name_from_url(url: &str) -> String {
     }
 }
 
+/// Choices in the "unsaved changes" prompt when closing a tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
 pub struct RequestTab {
     pub request: RequestSpec,
     pub response: ResponseState,
@@ -209,11 +219,15 @@ pub struct RequestTab {
     pub script_report: Option<crate::core::ScriptReport>,
     /// Cancels the in-flight send; dropping the task detaches the result.
     inflight: Option<(http::CancelToken, Task<()>)>,
+    /// What the tab started from, for "unsaved changes" of requests that are
+    /// not in any collection (new, from history, from a spec).
+    baseline: RequestSpec,
 }
 
 impl RequestTab {
     pub fn new(request: RequestSpec) -> Self {
         Self {
+            baseline: request.clone(),
             request,
             response: ResponseState::Empty,
             last_url: None,
@@ -283,6 +297,8 @@ pub struct Workspace {
     http_sessions: http::HttpSessions,
     pub history_panel: Entity<HistoryPanel>,
     pub palette: Option<Entity<CommandPalette>>,
+    /// Tab whose close is waiting for "save / don't save / cancel".
+    pub close_confirm: Option<usize>,
     /// Scripts changed environment variables; the env panel must reload them.
     env_panel_stale: bool,
     /// Transient message in the status bar ("Сохранено", "cURL скопирован").
@@ -303,6 +319,14 @@ pub struct Workspace {
     /// The active tab's request was refreshed from disk.
     active_stale: bool,
     _poll_task: Option<Task<()>>,
+    /// Self-update (see `update_ui`): state, side effects, popover.
+    pub update_state: UpdateState,
+    pub update_hooks: UpdateHooks,
+    pub update_popover_open: bool,
+    update_cancel: Option<http::CancelToken>,
+    update_task: Option<Task<()>>,
+    _update_progress: Option<Task<()>>,
+    _update_timer: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -437,6 +461,9 @@ impl Workspace {
             cx.subscribe_in(&history_panel, window, Self::on_history_event),
             cx.subscribe_in(&collection_panel, window, Self::on_collection_panel_event),
             cx.subscribe_in(&settings_panel, window, Self::on_settings_panel_event),
+            cx.subscribe(&settings_panel, |this, _, _: &CheckForUpdates, cx| {
+                this.check_for_updates(true, cx)
+            }),
             // The debounced save may still be pending when the app quits.
             cx.on_app_quit(|this, _| {
                 this.save_now();
@@ -444,7 +471,7 @@ impl Workspace {
             }),
         ];
 
-        Self {
+        let mut this = Self {
             focus,
             rail: RailMode::Requests,
             synced: project.clone(),
@@ -483,6 +510,7 @@ impl Workspace {
             http_sessions: http::HttpSessions::default(),
             history_panel,
             palette: None,
+            close_confirm: None,
             env_panel_stale: false,
             notice: None,
             notice_generation: 0,
@@ -493,8 +521,18 @@ impl Workspace {
             external_stale: false,
             active_stale: false,
             _poll_task: poll_task,
+            update_state: UpdateState::Idle,
+            update_hooks: UpdateHooks::production(),
+            update_popover_open: false,
+            update_cancel: None,
+            update_task: None,
+            _update_progress: None,
+            _update_timer: None,
             _subscriptions: subscriptions,
-        }
+        };
+        this.restart_update_timer(cx);
+        this.sync_update_status(cx);
+        this
     }
 
     // ---- accessors -------------------------------------------------------
@@ -915,7 +953,41 @@ impl Workspace {
             );
             return;
         }
+        if self.tab_unsaved(ix) {
+            self.close_confirm = Some(ix);
+            cx.notify();
+            return;
+        }
         self.force_close_tab_at(ix, window, cx);
+    }
+
+    /// Whether the tab has changes not saved to its collection (or, for a
+    /// request outside collections, changes since it was opened).
+    pub fn tab_unsaved(&self, ix: usize) -> bool {
+        let Some(tab) = self.tabs.get(ix) else { return false };
+        match find_request(&self.project, &tab.request.id) {
+            Some((_, saved)) => !same_request(saved, &tab.request),
+            None => !same_request(&tab.baseline, &tab.request),
+        }
+    }
+
+    /// Answer to the "unsaved changes" prompt shown when closing a tab.
+    pub fn resolve_close_confirm(&mut self, choice: CloseChoice, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.close_confirm.take() else { return };
+        match choice {
+            CloseChoice::Cancel => {}
+            CloseChoice::Discard => self.force_close_tab_at(ix, window, cx),
+            CloseChoice::Save => {
+                self.activate_tab(ix, window, cx);
+                self.save_request(window, cx);
+                // Saved into its collection → close; a new request opens the
+                // "save to collection" dialog instead and stays open.
+                if !self.tab_unsaved(ix) {
+                    self.force_close_tab_at(ix, window, cx);
+                }
+            }
+        }
+        cx.notify();
     }
 
     pub fn force_close_tab_at(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1760,7 +1832,11 @@ impl Workspace {
         if self.project.settings.cookies_enabled && !settings.cookies_enabled {
             self.http_sessions.clear_all();
         }
+        let auto_update_changed = self.project.settings.auto_update != settings.auto_update;
         self.project.settings = settings.clone();
+        if auto_update_changed {
+            self.restart_update_timer(cx);
+        }
         self.editor.update(cx, |editor, cx| {
             editor.set_redirect_defaults(settings.follow_redirects, settings.max_redirects, cx)
         });
@@ -2210,6 +2286,7 @@ impl Render for Workspace {
             || self.method_menu_open
             || self.new_tab_menu_open
             || self.confirm_open
+            || self.update_popover_open
             || self.request_split_dragging
             || self.rail == RailMode::Environments
             || self.rail == RailMode::Collections
@@ -2373,6 +2450,7 @@ impl Render for Workspace {
             )
             .child(self.render_status_bar(cx))
             .when_some(self.palette.clone(), |d, palette| d.child(palette))
+            .when_some(self.close_confirm, |d, ix| d.child(self.render_close_confirm(ix, cx)))
             .when_some(self.collection_dialog.clone(), |d, dialog| d.child(dialog))
     }
 }
