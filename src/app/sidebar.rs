@@ -52,6 +52,13 @@ impl Workspace {
     ) {
         self.collection_menu = None;
         match (target, action) {
+            (SidebarMenu::Collection(id), export) if export.starts_with("export-") => {
+                if let Some(format) =
+                    crate::core::export::ExportFormat::from_id(&export["export-".len()..])
+                {
+                    self.prompt_export_collection(&id, format, cx);
+                }
+            }
             (SidebarMenu::Collection(id), "new-request") => {
                 self.new_request_in(id, None, window, cx)
             }
@@ -185,6 +192,9 @@ impl Workspace {
                 ("new-folder", "Новая папка"),
                 ("rename", "Переименовать"),
                 ("settings", "Настройки коллекции"),
+                ("export-rivet", "Экспорт: Rivet (без потерь)"),
+                ("export-postman", "Экспорт: Postman v2.1"),
+                ("export-openapi", "Экспорт: OpenAPI 3"),
                 ("delete", "Удалить коллекцию"),
             ],
             SidebarMenu::Folder(_, _) => vec![

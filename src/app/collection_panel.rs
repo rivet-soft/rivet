@@ -1,5 +1,6 @@
 //! Collection management and collection-scoped variables.
 
+use crate::core::export::ExportFormat;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -15,6 +16,8 @@ pub enum CollectionPanelEvent {
     ClearCookies(String),
     /// Confirmed "Удалить коллекцию": drop it from the project (never its source file).
     Delete(String),
+    /// Save the collection to a file in this format.
+    Export(String, ExportFormat),
 }
 impl EventEmitter<CollectionPanelEvent> for CollectionPanel {}
 
@@ -334,6 +337,15 @@ impl Render for CollectionPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_cookies(cx))))
                         .child(Button::new("collection-cookies-clear", "Очистить cookies")
                             .on_click({ let id = col.id.clone(); cx.listener(move |_, _, _, cx| cx.emit(CollectionPanelEvent::ClearCookies(id.clone()))) })))
+                    .child(div().pt(px(12.)).border_t_1().border_color(p.border)
+                        .text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Экспорт"))
+                    .child(div().text_color(p.text_dim).child("Rivet сохраняет всё без потерь. Postman и OpenAPI — для обмена с другими инструментами; то, что формат не поддерживает, будет перечислено после сохранения."))
+                    .child(div().flex().flex_wrap().items_center().gap(px(8.))
+                        .children(ExportFormat::ALL.into_iter().enumerate().map(|(i, format)| {
+                            let id = col.id.clone();
+                            Button::new(("collection-export", i), format.label())
+                                .on_click(cx.listener(move |_, _, _, cx| cx.emit(CollectionPanelEvent::Export(id.clone(), format))))
+                        })))
                     .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Переменные коллекции"))
                     .child(div().text_color(p.text_dim).child("Используйте {{var}} в URL, заголовках и теле. Значения коллекции имеют приоритет над окружением."))
                     .children(rows)

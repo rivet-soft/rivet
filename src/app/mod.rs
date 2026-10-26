@@ -1808,7 +1808,64 @@ impl Workspace {
                 self.notify_user("Cookies коллекции очищены", cx);
             }
             CollectionPanelEvent::Delete(id) => self.delete_collection(id, window, cx),
+            CollectionPanelEvent::Export(id, format) => self.prompt_export_collection(id, *format, cx),
         }
+    }
+
+    /// Writes collection `id` to `path` in `format`; returns what the format
+    /// couldn't carry over.
+    pub fn export_collection_to(
+        &self,
+        id: &str,
+        format: crate::core::export::ExportFormat,
+        path: &std::path::Path,
+    ) -> Result<Vec<String>, String> {
+        let collection = self
+            .project
+            .collections
+            .iter()
+            .find(|c| c.id == id)
+            .ok_or("Коллекция не найдена")?;
+        let exported = crate::core::export::export(collection, format)?;
+        std::fs::write(path, exported.text).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(exported.warnings)
+    }
+
+    /// "Экспорт" (collection menu / panel): asks where to save, then writes.
+    pub fn prompt_export_collection(
+        &mut self,
+        id: &str,
+        format: crate::core::export::ExportFormat,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(collection) = self.project.collections.iter().find(|c| c.id == id) else {
+            return;
+        };
+        let name = format.file_name(&collection.name);
+        let dir = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let path = cx.prompt_for_new_path(&dir, Some(&name));
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = path.await else { return };
+            this.update(cx, |this, cx| {
+                let text = match this.export_collection_to(&id, format, &path) {
+                    Ok(warnings) if warnings.is_empty() => {
+                        format!("Коллекция сохранена: {}", path.display())
+                    }
+                    Ok(warnings) => format!(
+                        "Коллекция сохранена: {}. Не вошло в формат: {}",
+                        path.display(),
+                        warnings.join("; ")
+                    ),
+                    Err(e) => format!("Не удалось экспортировать: {e}"),
+                };
+                this.notify_user(text, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Removes a collection from the project (and so from project.json).

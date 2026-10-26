@@ -1339,3 +1339,57 @@ fn invalid_header_is_not_sent_and_explains_why(cx: &mut TestAppContext) {
     });
     assert!(seen.lock().unwrap().is_empty(), "nothing reached the server");
 }
+
+#[gpui_kit::test]
+fn collections_export_in_three_formats(cx: &mut TestAppContext) {
+    use rivet::core::export::ExportFormat;
+    let mut p = project();
+    let mut list = rivet::core::RequestSpec::new("List", Method::Get, "{{baseUrl}}/orders");
+    list.collection_id = Some(p.collections[0].id.clone());
+    p.collections[0].requests.push(list);
+    let id = p.collections[0].id.clone();
+    let (view, window) = open_with(cx, p);
+    // Offered in the collection's "···" menu.
+    window.update(|w, cx| {
+        w.click("sidebar-menu-trigger-collection-0", cx);
+        w.render_frame(cx);
+        for action in [
+            "sidebar-action-collection-0-export-rivet",
+            "sidebar-action-collection-0-export-postman",
+            "sidebar-action-collection-0-export-openapi",
+        ] {
+            assert!(w.try_find(action).is_some(), "{action}");
+        }
+    });
+    // And on the Collections page.
+    view.update_in(window, |v, window, cx| v.set_rail(RailMode::Collections, window, cx));
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        for i in 0..3usize {
+            assert!(w.try_find(("collection-export", i)).is_some());
+        }
+    });
+    let dir = std::env::temp_dir().join(format!("rivet-ws-export-{}", rivet::core::new_id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    view.read_with(window, |v, _| {
+        for format in ExportFormat::ALL {
+            let path = dir.join(format.file_name("Мои запросы"));
+            let warnings = v.export_collection_to(&id, format, &path).unwrap();
+            assert!(warnings.is_empty(), "{warnings:?}");
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(text.contains("/orders"), "{format:?}: {text}");
+        }
+        assert!(v.export_collection_to("nope", ExportFormat::Rivet, &dir.join("x")).is_err());
+    });
+    // Re-importing the Rivet file adds a copy of the collection.
+    view.update_in(window, |v, window, cx| {
+        v.import_file(dir.join(ExportFormat::Rivet.file_name("Мои запросы")), window, cx)
+    });
+    view.read_with(window, |v, _| {
+        assert_eq!(v.project.collections.len(), 2);
+        assert_eq!(v.project.collections[1].name, "Мои запросы");
+        assert_ne!(v.project.collections[1].id, id);
+        assert_eq!(v.project.collections[1].requests[0].name, "List");
+    });
+    std::fs::remove_dir_all(&dir).ok();
+}
