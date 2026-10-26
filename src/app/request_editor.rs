@@ -644,6 +644,10 @@ pub struct RequestEditor {
     api_key: Entity<InputState>,
     api_value: Entity<InputState>,
     redirect_limit: Entity<InputState>,
+    /// Timeout override in ms ("" = the app's).
+    request_timeout: Entity<InputState>,
+    /// App timeout (ms) and SSL check, shown next to the overrides.
+    connection_defaults: (u64, bool),
     redirect_defaults: (bool, u32),
     script_stage: ScriptStage,
     /// One JS editor per stage, so each keeps its own cursor and undo history.
@@ -677,6 +681,7 @@ impl RequestEditor {
         let api_key = cx.new(|cx| InputState::new(window, cx).placeholder("X-API-Key"));
         let api_value = cx.new(|cx| InputState::new(window, cx).placeholder("Value"));
         let redirect_limit = cx.new(|cx| InputState::new(window, cx).placeholder("По умолчанию"));
+        let request_timeout = cx.new(|cx| InputState::new(window, cx).placeholder("По умолчанию"));
         let pre_script = cx.new(|cx| EditorState::new(window, cx).language("javascript"));
         let post_script = cx.new(|cx| EditorState::new(window, cx).language("javascript"));
         let docs_editor = cx.new(|cx| {
@@ -721,6 +726,28 @@ impl RequestEditor {
                 },
             ));
         }
+        subscriptions.push(cx.subscribe_in(
+            &request_timeout,
+            window,
+            |this, state, ev: &InputEvent, _, cx| {
+                if let InputEvent::Change = ev {
+                    let value = state.read(cx).value().trim().to_string();
+                    // Empty: the app's timeout; otherwise 1 ms .. 1 hour.
+                    let parsed = if value.is_empty() {
+                        Some(None)
+                    } else {
+                        value.parse::<u64>().ok().filter(|v| (1..=3_600_000).contains(v)).map(Some)
+                    };
+                    if let Some(timeout) = parsed {
+                        if this.spec.timeout_ms != timeout {
+                            this.spec.timeout_ms = timeout;
+                            cx.emit(RequestEditorEvent::Changed);
+                        }
+                        cx.notify();
+                    }
+                }
+            },
+        ));
         subscriptions.push(cx.subscribe_in(
             &redirect_limit,
             window,
@@ -813,6 +840,8 @@ impl RequestEditor {
             api_value,
             redirect_limit,
             redirect_defaults: (true, 10),
+            connection_defaults: (30_000, true),
+            request_timeout,
             script_stage: ScriptStage::default(),
             pre_script,
             post_script,
@@ -890,6 +919,8 @@ impl RequestEditor {
             Auth::None | Auth::Inherit => ("", "", "", "", "", false),
         };
         self.api_in_query = in_query;
+        let timeout = self.spec.timeout_ms.map(|v| v.to_string()).unwrap_or_default();
+        self.request_timeout.update(cx, |s, cx| s.set_value(timeout, window, cx));
         self.redirect_limit.update(cx, |s, cx| {
             s.set_value(
                 self.spec
@@ -1005,6 +1036,21 @@ impl RequestEditor {
 
     pub fn set_redirect_defaults(&mut self, follow: bool, max: u32, cx: &mut Context<Self>) {
         self.redirect_defaults = (follow, max);
+        cx.notify();
+    }
+
+    /// The app's settings the request's own ones fall back to (shown as hints).
+    pub fn set_app_defaults(&mut self, settings: &crate::core::types::Settings, cx: &mut Context<Self>) {
+        self.redirect_defaults = (settings.follow_redirects, settings.max_redirects);
+        self.connection_defaults = (settings.timeout_ms, settings.ssl_verify);
+        cx.notify();
+    }
+
+    fn set_ssl_verify(&mut self, verify: Option<bool>, cx: &mut Context<Self>) {
+        if self.spec.ssl_verify != verify {
+            self.spec.ssl_verify = verify;
+            cx.emit(RequestEditorEvent::Changed);
+        }
         cx.notify();
     }
 
@@ -2908,16 +2954,77 @@ impl Render for RequestEditor {
                 .into_any_element(),
             RequestEditorTab::Settings => {
                 let view = cx.entity();
-                RequestRedirectSettings::new(
-                    self.spec.follow_redirects,
-                    self.redirect_defaults.0,
-                    self.redirect_defaults.1,
-                    self.redirect_limit.clone(),
-                    move |follow, _, cx| {
-                        view.update(cx, |this, cx| this.set_follow_redirects(follow, cx));
-                    },
-                )
-                .into_any_element()
+                let ssl_view = view.clone();
+                let (default_timeout, default_ssl) = self.connection_defaults;
+                div()
+                    .id("request-settings")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(RequestRedirectSettings::new(
+                        self.spec.follow_redirects,
+                        self.redirect_defaults.0,
+                        self.redirect_defaults.1,
+                        self.redirect_limit.clone(),
+                        move |follow, _, cx| {
+                            view.update(cx, |this, cx| this.set_follow_redirects(follow, cx));
+                        },
+                    ))
+                    .child(
+                        div()
+                            .id("request-connection-settings")
+                            .flex()
+                            .flex_col()
+                            .gap(px(16.))
+                            .px(px(18.))
+                            .pb(px(18.))
+                            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child("Соединение"))
+                            .child(div().text_size(px(12.)).text_color(p.text_dim).child(format!(
+                                "Настройка приложения: таймаут {default_timeout} мс · сертификаты SSL {}",
+                                if default_ssl { "проверяются" } else { "не проверяются" }
+                            )))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(12.))
+                                    .child(div().text_size(px(12.)).child("Проверка SSL"))
+                                    .child(
+                                        Segmented::new("request-ssl-verify")
+                                            .items(["По умолчанию", "Проверять", "Не проверять"])
+                                            .selected(match self.spec.ssl_verify {
+                                                None => 0,
+                                                Some(true) => 1,
+                                                Some(false) => 2,
+                                            })
+                                            .on_select(move |index, _, cx| {
+                                                let verify = match index {
+                                                    1 => Some(true),
+                                                    2 => Some(false),
+                                                    _ => None,
+                                                };
+                                                ssl_view.update(cx, |this, cx| this.set_ssl_verify(verify, cx));
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(12.))
+                                    .child(div().text_size(px(12.)).child("Таймаут, мс"))
+                                    .child(div().w(px(160.)).child(
+                                        Input::new(&self.request_timeout).id("request-timeout").h(px(30.)),
+                                    )),
+                            )
+                            .child(div().text_size(px(11.)).text_color(p.text_dim).child(
+                                "Пусто — значение приложения. От 1 до 3 600 000 мс.",
+                            ))
+                            .test_support(),
+                    )
+                    .into_any_element()
             }
         };
         let available = self

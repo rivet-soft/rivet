@@ -1661,3 +1661,29 @@ fn collection_description_is_editable(cx: &mut TestAppContext) {
         assert_eq!(v.project.collections[0].description, "Внутренний API магазина");
     });
 }
+
+#[gpui_kit::test]
+fn request_timeout_override_applies_when_sending(cx: &mut TestAppContext) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            std::thread::sleep(Duration::from_millis(1000));
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        }
+    });
+    let mut p = project();
+    let mut slow = rivet::core::RequestSpec::new("Slow", Method::Get, format!("{base}/slow"));
+    slow.timeout_ms = Some(150);
+    p.open_tabs = vec![slow];
+    p.active_tab = Some(0);
+    let (view, window) = open_with(cx, p);
+    window.update(|w, cx| w.press("cmd-enter", cx));
+    wait_sent(&view, window, 0);
+    view.read_with(window, |v, _| match &v.tabs[0].response {
+        ResponseState::Failed(rivet::core::SendError::Timeout { after_ms }) => assert_eq!(*after_ms, 150),
+        other => panic!("{other:?}"),
+    });
+}

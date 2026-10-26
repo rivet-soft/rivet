@@ -473,11 +473,7 @@ impl Workspace {
         };
         let editor = cx.new(|cx| RequestEditor::new(first, window, cx));
         editor.update(cx, |editor, cx| {
-            editor.set_redirect_defaults(
-                project.settings.follow_redirects,
-                project.settings.max_redirects,
-                cx,
-            )
+            editor.set_app_defaults(&project.settings, cx)
         });
         let response = cx.new(|cx| ResponseView::new(window, cx));
         let env_panel = {
@@ -691,7 +687,7 @@ impl Workspace {
             .update(cx, |p, cx| p.set_collections(collections, window, cx));
         let settings = self.project.settings.clone();
         self.editor.update(cx, |e, cx| {
-            e.set_redirect_defaults(settings.follow_redirects, settings.max_redirects, cx)
+            e.set_app_defaults(&settings, cx)
         });
         self.settings_panel
             .update(cx, |p, cx| p.set_settings(settings, window, cx));
@@ -2218,7 +2214,7 @@ impl Workspace {
             self.restart_update_timer(cx);
         }
         self.editor.update(cx, |editor, cx| {
-            editor.set_redirect_defaults(settings.follow_redirects, settings.max_redirects, cx)
+            editor.set_app_defaults(&settings, cx)
         });
         self.schedule_save(cx);
         cx.notify();

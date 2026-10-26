@@ -886,3 +886,39 @@ fn docs_tab_edits_the_description(cx: &mut TestAppContext) {
     });
     view.read_with(window, |v, _| assert!(v.spec().description.is_empty()));
 }
+
+#[gpui_kit::test]
+fn request_connection_settings_override_ssl_and_timeout(cx: &mut TestAppContext) {
+    let (view, window, events) = open(cx, sample());
+    window.update(|w, cx| {
+        w.click(("subtab", RequestEditorTab::Settings as usize), cx);
+        w.render_frame(cx);
+        assert!(w.try_find("request-connection-settings").is_some());
+        w.within("request-ssl-verify").click(2usize, cx);
+        w.click("request-timeout", cx);
+        w.input("2500", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |editor, _| {
+        assert_eq!(editor.spec().ssl_verify, Some(false));
+        assert_eq!(editor.spec().timeout_ms, Some(2500));
+    });
+    assert!(events.borrow().contains(&RequestEditorEvent::Changed));
+    // Out of range is ignored; empty and "По умолчанию" fall back to the app.
+    window.update(|w, cx| {
+        w.click("request-timeout", cx);
+        w.press("cmd-a", cx);
+        w.input("0", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |editor, _| assert_eq!(editor.spec().timeout_ms, Some(2500)));
+    window.update(|w, cx| {
+        w.press("backspace", cx);
+        w.within("request-ssl-verify").click(0usize, cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |editor, _| {
+        assert_eq!(editor.spec().timeout_ms, None);
+        assert_eq!(editor.spec().ssl_verify, None);
+    });
+}
