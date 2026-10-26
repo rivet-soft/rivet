@@ -152,6 +152,11 @@ pub struct RequestSpec {
     pub follow_redirects: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_redirects: Option<u32>,
+    /// Overrides of the application's timeout and SSL certificate check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_verify: Option<bool>,
     /// Pre-request / post-response JavaScript (Postman-compatible `pm.*`).
     #[serde(default, skip_serializing_if = "Scripts::is_empty")]
     pub scripts: Scripts,
@@ -267,6 +272,8 @@ impl RequestSpec {
             folder: None,
             follow_redirects: None,
             max_redirects: None,
+            timeout_ms: None,
+            ssl_verify: None,
             scripts: Scripts::default(),
             kind: RequestKind::Http,
             ws: WsSettings::default(),

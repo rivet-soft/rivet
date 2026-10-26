@@ -311,6 +311,9 @@ fn pm_item(request: &RequestSpec, warnings: &mut Vec<String>) -> Value {
     if let Some(max) = request.max_redirects {
         behavior.insert("maxRedirects".into(), json!(max));
     }
+    if let Some(verify) = request.ssl_verify {
+        behavior.insert("strictSSL".into(), json!(verify));
+    }
     if !behavior.is_empty() {
         item["protocolProfileBehavior"] = Value::Object(behavior);
     }
@@ -722,6 +725,9 @@ pub fn to_openapi(collection: &Collection) -> (Value, Vec<String>) {
         if r.follow_redirects.is_some() || r.max_redirects.is_some() {
             op["x-rivet-redirects"] = json!({"follow": r.follow_redirects, "max": r.max_redirects});
         }
+        if r.timeout_ms.is_some() || r.ssl_verify.is_some() {
+            op["x-rivet-connection"] = json!({"timeout_ms": r.timeout_ms, "ssl_verify": r.ssl_verify});
+        }
         if body.kind == BodyKind::Binary {
             if let Some(p) = &body.file_path {
                 op["x-rivet-body-file"] = json!(p.display().to_string());
@@ -787,6 +793,8 @@ mod tests {
         list.scripts = Scripts { pre_request: "pm.environment.set('a', 1);\nconsole.log(2);".into(), post_response: "pm.test('ok', () => {});".into() };
         list.follow_redirects = Some(false);
         list.max_redirects = Some(3);
+        list.ssl_verify = Some(false);
+        list.timeout_ms = Some(1500);
         list.description = "Lists users.\n\n- paged".into();
         list.examples = vec![
             crate::core::types::Example {
@@ -864,7 +872,7 @@ mod tests {
         assert_eq!(doc["item"][0]["name"], "Users");
         assert_eq!(doc["item"][0]["item"][0]["name"], "Admin");
         assert_eq!(doc["item"][1]["name"], "Empty");
-        assert_eq!(doc["item"][0]["item"][1]["protocolProfileBehavior"], json!({"followRedirects": false, "maxRedirects": 3}));
+        assert_eq!(doc["item"][0]["item"][1]["protocolProfileBehavior"], json!({"followRedirects": false, "maxRedirects": 3, "strictSSL": false}));
 
         let imported = PostmanImport::parse(&out.text).unwrap().collection;
         assert_eq!(imported.name, "Shop API");
@@ -890,6 +898,7 @@ mod tests {
         assert_eq!(list.description, c.requests[0].description);
         assert_eq!(list.folder.as_deref(), Some("Users"));
         assert_eq!(list.follow_redirects, Some(false));
+        assert_eq!(list.ssl_verify, Some(false));
         let strip = |e: &crate::core::types::Example| (e.name.clone(), e.status, e.status_text.clone(), e.headers.clone(), e.body.clone());
         assert_eq!(
             list.examples.iter().map(strip).collect::<Vec<_>>(),
@@ -947,6 +956,7 @@ mod tests {
         assert_eq!(params[2]["x-rivet-disabled"], true);
         assert_eq!(list["security"], json!([{"bearerAuth": []}]));
         assert_eq!(list["x-rivet-redirects"], json!({"follow": false, "max": 3}));
+        assert_eq!(list["x-rivet-connection"], json!({"timeout_ms": 1500, "ssl_verify": false}));
         assert_eq!(list["responses"]["200"]["content"]["application/json"]["example"], json!([{"id": 1}, {"id": 2}]));
         assert_eq!(list["responses"]["401"]["content"]["text/plain"]["example"], "nope");
         assert_eq!(list["responses"]["401"]["description"], "Unauthorized");

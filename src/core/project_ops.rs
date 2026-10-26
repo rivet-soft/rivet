@@ -145,13 +145,24 @@ pub fn collection_of<'a>(project: &'a Project, request: &RequestSpec) -> Option<
 /// Project settings with the request's redirect overrides applied.
 pub fn request_settings(project: &Project, request: &RequestSpec) -> Settings {
     let mut settings = project.settings.clone();
+    apply_request_overrides(&mut settings, request);
+    settings
+}
+
+/// The request's own redirect, timeout and SSL settings over the app's.
+pub fn apply_request_overrides(settings: &mut Settings, request: &RequestSpec) {
     if let Some(follow) = request.follow_redirects {
         settings.follow_redirects = follow;
     }
     if let Some(limit) = request.max_redirects {
         settings.max_redirects = limit;
     }
-    settings
+    if let Some(timeout) = request.timeout_ms {
+        settings.timeout_ms = timeout.max(1);
+    }
+    if let Some(verify) = request.ssl_verify {
+        settings.ssl_verify = verify;
+    }
 }
 
 /// Cookie jar scope: per collection (when enabled), or the shared unsaved scope.
@@ -267,6 +278,23 @@ mod tests {
         }
         p.collections.push(c);
         p
+    }
+
+    #[test]
+    fn request_overrides_win_over_app_settings() {
+        let mut settings = Settings::default();
+        let mut r = RequestSpec::new("x", crate::core::types::Method::Get, "http://h/");
+        apply_request_overrides(&mut settings, &r);
+        assert_eq!(settings, Settings::default(), "no overrides: app settings as they are");
+        r.follow_redirects = Some(false);
+        r.max_redirects = Some(2);
+        r.timeout_ms = Some(0);
+        r.ssl_verify = Some(false);
+        apply_request_overrides(&mut settings, &r);
+        assert!(!settings.follow_redirects);
+        assert_eq!(settings.max_redirects, 2);
+        assert_eq!(settings.timeout_ms, 1, "a zero timeout is clamped");
+        assert!(!settings.ssl_verify);
     }
 
     #[test]

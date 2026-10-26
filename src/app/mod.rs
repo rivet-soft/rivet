@@ -190,6 +190,8 @@ fn same_request(a: &RequestSpec, b: &RequestSpec) -> bool {
         folder,
         follow_redirects,
         max_redirects,
+        timeout_ms,
+        ssl_verify,
         scripts,
         kind,
         ws,
@@ -209,6 +211,8 @@ fn same_request(a: &RequestSpec, b: &RequestSpec) -> bool {
         && *folder == b.folder
         && *follow_redirects == b.follow_redirects
         && *max_redirects == b.max_redirects
+        && *timeout_ms == b.timeout_ms
+        && *ssl_verify == b.ssl_verify
         && *scripts == b.scripts
         && *kind == b.kind
         && *ws == b.ws
@@ -1379,6 +1383,8 @@ impl Workspace {
                     tab.request.auth = spec.auth;
                     tab.request.follow_redirects = spec.follow_redirects;
                     tab.request.max_redirects = spec.max_redirects;
+                    tab.request.timeout_ms = spec.timeout_ms;
+                    tab.request.ssl_verify = spec.ssl_verify;
                     tab.request.scripts = spec.scripts;
                     tab.request.description = spec.description;
                 }
@@ -1438,12 +1444,7 @@ impl Workspace {
         let collection_vars = collection.map(|c| c.vars.clone()).unwrap_or_default();
         let env = self.env().cloned();
         let mut settings = self.project.settings.clone();
-        if let Some(follow) = request.follow_redirects {
-            settings.follow_redirects = follow;
-        }
-        if let Some(limit) = request.max_redirects {
-            settings.max_redirects = limit;
-        }
+        crate::core::project_ops::apply_request_overrides(&mut settings, &request);
         let cookie_scope = settings
             .cookies_enabled
             .then(|| match collection {
