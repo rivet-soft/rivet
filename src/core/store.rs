@@ -184,6 +184,7 @@ fn merge_collection(base: &Collection, local: &Collection, disk: &Collection) ->
         vars: merge_vars(&base.vars, &local.vars, &disk.vars),
         source: pick(&base.source, &local.source, &disk.source),
         cookies_enabled: pick(&base.cookies_enabled, &local.cookies_enabled, &disk.cookies_enabled),
+        description: pick(&base.description, &local.description, &disk.description),
     }
 }
 

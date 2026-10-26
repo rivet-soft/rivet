@@ -164,6 +164,9 @@ pub struct RequestSpec {
     /// Saved responses ("Сохранить как пример"), like Postman's examples.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<Example>,
+    /// Documentation (plain text / Markdown), the "Docs" tab.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
 }
 
 /// A response saved with its request.
@@ -268,6 +271,7 @@ impl RequestSpec {
             kind: RequestKind::Http,
             ws: WsSettings::default(),
             examples: Vec::new(),
+            description: String::new(),
         }
     }
 
@@ -352,6 +356,9 @@ pub struct Collection {
     /// Use a cookie jar shared by requests in this collection for this app session.
     #[serde(default = "yes")]
     pub cookies_enabled: bool,
+    /// Documentation of the collection (plain text / Markdown).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
 }
 
 impl Collection {
@@ -364,6 +371,7 @@ impl Collection {
             vars: Vec::new(),
             source: None,
             cookies_enabled: true,
+            description: String::new(),
         }
     }
 }
@@ -660,6 +668,7 @@ impl SpecEndpoint {
             format!("{{{{baseUrl}}}}{}", self.path),
         );
         r.params = self.params.clone();
+        r.description = self.description.clone();
         if let Some(body) = &self.example_body {
             r.body = Body::json(body.clone());
         }

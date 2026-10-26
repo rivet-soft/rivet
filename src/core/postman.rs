@@ -27,6 +27,7 @@ impl PostmanImport {
         }
         let name = doc["info"]["name"].as_str().unwrap_or("Postman collection");
         let mut collection = Collection::new(name);
+        collection.description = doc.pointer("/info/description").map(description).unwrap_or_default();
         collection.vars = key_values(doc.get("variable"), "key");
         let mut out = Self {
             collection,
@@ -250,6 +251,7 @@ fn parse_request(
     let mut request = RequestSpec::new(name, method, raw);
     request.params = structured_query;
     request.path_vars = path_vars;
+    request.description = req.get("description").map(description).unwrap_or_default();
     request.headers = key_values(req.get("header"), "key");
     request.auth = parse_auth(auth);
     if let Some(body) = req.get("body") {

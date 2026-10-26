@@ -194,6 +194,7 @@ fn same_request(a: &RequestSpec, b: &RequestSpec) -> bool {
         kind,
         ws,
         examples,
+        description,
     } = a;
     *id == b.id
         && *name == b.name
@@ -212,6 +213,7 @@ fn same_request(a: &RequestSpec, b: &RequestSpec) -> bool {
         && *kind == b.kind
         && *ws == b.ws
         && *examples == b.examples
+        && *description == b.description
 }
 
 /// Where a tab's request stands relative to its collection.

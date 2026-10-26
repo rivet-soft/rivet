@@ -269,6 +269,9 @@ fn pm_item(request: &RequestSpec, warnings: &mut Vec<String>) -> Value {
     if let Some(body) = pm_body(request, warnings) {
         req["body"] = body;
     }
+    if !request.description.is_empty() {
+        req["description"] = json!(request.description);
+    }
     let mut item = json!({"name": request.name, "request": req.clone()});
     if !request.examples.is_empty() {
         item["response"] = Value::Array(
@@ -382,6 +385,7 @@ pub fn to_postman(collection: &Collection) -> (Value, Vec<String>) {
             "_postman_id": collection.id,
             "name": collection.name,
             "schema": POSTMAN_SCHEMA,
+            "description": collection.description,
         },
         "item": items(&tree, collection, &mut warnings),
     });
@@ -645,6 +649,9 @@ pub fn to_openapi(collection: &Collection) -> (Value, Vec<String>) {
             "operationId": operation_id(&r.name, &mut used_ids),
             "responses": responses_for(r),
         });
+        if !r.description.is_empty() {
+            op["description"] = json!(r.description);
+        }
         if let Some(folder) = r.folder.as_ref().filter(|f| !f.is_empty()) {
             op["tags"] = json!([folder]);
             if !tags.contains(folder) {
@@ -739,7 +746,7 @@ pub fn to_openapi(collection: &Collection) -> (Value, Vec<String>) {
         .collect();
     let mut doc = json!({
         "openapi": "3.0.3",
-        "info": {"title": collection.name, "version": "1.0.0"},
+        "info": {"title": collection.name, "version": "1.0.0", "description": collection.description},
         "paths": paths.into_iter().map(|(k, v)| (k, Value::Object(v))).collect::<Map<_, _>>(),
     });
     if !server_list.is_empty() {
@@ -766,6 +773,7 @@ mod tests {
 
     fn sample() -> Collection {
         let mut c = Collection::new("Shop API");
+        c.description = "Shop **API**\nv2".into();
         c.vars = vec![KeyValue::new("baseUrl", "https://api.shop.dev"), KeyValue::new("id", "42")];
         c.folders = vec!["Users".into(), "Users / Admin".into(), "Empty".into()];
         let mut list = RequestSpec::new("List users", Method::Get, "{{baseUrl}}/users?active=1");
@@ -779,6 +787,7 @@ mod tests {
         list.scripts = Scripts { pre_request: "pm.environment.set('a', 1);\nconsole.log(2);".into(), post_response: "pm.test('ok', () => {});".into() };
         list.follow_redirects = Some(false);
         list.max_redirects = Some(3);
+        list.description = "Lists users.\n\n- paged".into();
         list.examples = vec![
             crate::core::types::Example {
                 id: "e1".into(),
@@ -860,6 +869,7 @@ mod tests {
         let imported = PostmanImport::parse(&out.text).unwrap().collection;
         assert_eq!(imported.name, "Shop API");
         assert_eq!(imported.vars, c.vars);
+        assert_eq!(imported.description, c.description);
         let mut folders = imported.folders.clone();
         folders.sort();
         assert_eq!(folders, ["Empty", "Users", "Users / Admin"]);
@@ -877,6 +887,7 @@ mod tests {
         assert_eq!(list.headers, c.requests[0].headers);
         assert_eq!(list.auth, c.requests[0].auth);
         assert_eq!(list.scripts, c.requests[0].scripts);
+        assert_eq!(list.description, c.requests[0].description);
         assert_eq!(list.folder.as_deref(), Some("Users"));
         assert_eq!(list.follow_redirects, Some(false));
         let strip = |e: &crate::core::types::Example| (e.name.clone(), e.status, e.status_text.clone(), e.headers.clone(), e.body.clone());
@@ -927,6 +938,8 @@ mod tests {
         assert_eq!(doc["servers"][1]["url"], "https://auth.example.com");
         let list = &doc["paths"]["/users"]["get"];
         assert_eq!(list["tags"], json!(["Users"]));
+        assert_eq!(list["description"], "Lists users.\n\n- paged");
+        assert_eq!(doc["info"]["description"], "Shop **API**\nv2");
         let params = list["parameters"].as_array().unwrap();
         let names: Vec<&str> = params.iter().map(|p| p["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["active", "limit", "debug", "Accept", "X-Off"]);
