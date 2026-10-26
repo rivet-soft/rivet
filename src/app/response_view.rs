@@ -52,7 +52,7 @@ use crate::core::types::{
 use crate::theme::{ActivePalette, MONO, Palette};
 use crate::ui::{
     Button, EmptyState, ErrorState, IconButton, IconName, LoadingState, MethodBadge, Pill,
-    ProgressBar, Segmented, icon,
+    ProgressBar, Segmented, Tooltip, icon,
 };
 use gpui_kit::base::{SelectableText, TextSelection, TextSelectionLayer};
 use gpui_kit::component::highlighter::{Diagnostic, DiagnosticSeverity};
@@ -84,6 +84,8 @@ pub enum ResponseState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResponseViewEvent {
     Retry,
+    /// "Сохранить как пример" in the response header.
+    SaveExample,
     Cancel,
     UpdateSchema,
     GoToSchema,
@@ -1193,7 +1195,15 @@ impl ResponseView {
                 )
             })
             .child(div().flex_1())
-            .child(IconButton::new("response-bookmark", IconName::Bookmark).on_click(|_, _, _| {}))
+            .child(
+                div()
+                    .id("response-save-example")
+                    .tooltip(Tooltip::new("Сохранить как пример").part("ответ сохранится вместе с запросом").build())
+                    .child(
+                        IconButton::new("response-bookmark", IconName::Bookmark)
+                            .on_click(self.emitter(ResponseViewEvent::SaveExample, cx)),
+                    ),
+            )
             .test_support();
 
         let tabs = self.render_tabs(prep.headers.len(), cx);

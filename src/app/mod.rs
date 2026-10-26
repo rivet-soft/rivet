@@ -46,8 +46,8 @@ use self::ws_view::{WsView, WsViewEvent};
 use crate::core::openapi::Spec;
 use crate::core::postman::{self, PostmanImport};
 use crate::core::{
-    Collection, Environment, HistoryEntry, Method, Project, RequestSpec, SendError, SpecGroup,
-    curl, http, new_id, runner, store, vars, ws,
+    Collection, Environment, Example, HistoryEntry, KeyValue, Method, Project, RequestSpec,
+    SendError, SpecGroup, curl, http, new_id, runner, store, vars, ws,
 };
 use crate::model::RailMode;
 use crate::theme::{ActivePalette, Palette};
@@ -1041,6 +1041,104 @@ impl Workspace {
         }
     }
 
+    /// "Сохранить как пример": stores the active tab's response with its
+    /// request in the collection (and in the tab, so it stays "saved").
+    pub fn save_example(&mut self, cx: &mut Context<Self>) {
+        let Some(ix) = self.active_tab else { return };
+        let ResponseState::Done { response, .. } = &self.tabs[ix].response else {
+            self.notify_user("Нет ответа для сохранения", cx);
+            return;
+        };
+        if response.body.len() > Example::MAX_BODY {
+            self.notify_user("Ответ больше 5 МБ — такой пример не сохраняется", cx);
+            return;
+        }
+        let example = Example {
+            id: new_id(),
+            name: Example::default_name(response.status, &response.status_text),
+            status: response.status,
+            status_text: response.status_text.clone(),
+            headers: response.headers.iter().map(|(k, v)| KeyValue::new(k, v)).collect(),
+            body: String::from_utf8_lossy(&response.body).into_owned(),
+            url: self.tabs[ix].last_url.clone(),
+            saved_at: now_secs(),
+        };
+        let id = self.tabs[ix].request.id.clone();
+        let Some(stored) = self
+            .project
+            .collections
+            .iter_mut()
+            .flat_map(|c| c.requests.iter_mut())
+            .find(|r| r.id == id)
+        else {
+            self.notify_user("Сначала сохраните запрос в коллекцию (⌘S)", cx);
+            return;
+        };
+        stored.examples.push(example.clone());
+        let name = example.name.clone();
+        self.tabs[ix].request.examples.push(example);
+        self.schedule_save(cx);
+        self.notify_user(format!("Пример «{name}» сохранён"), cx);
+        cx.notify();
+    }
+
+    /// Opens example `ei` of saved request `idx` of collection `col`: the
+    /// request's tab shows the example as its response.
+    pub fn open_example(
+        &mut self,
+        col: usize,
+        idx: usize,
+        ei: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(example) = self
+            .project
+            .collections
+            .get(col)
+            .and_then(|c| c.requests.get(idx))
+            .and_then(|r| r.examples.get(ei))
+            .cloned()
+        else {
+            return;
+        };
+        self.open_saved(col, idx, window, cx);
+        let Some(ix) = self.active_tab else { return };
+        let state = ResponseState::Done {
+            response: example.to_response(),
+            schema_label: None,
+            mismatches: Vec::new(),
+        };
+        self.tabs[ix].response = state.clone();
+        self.tabs[ix].last_url = example.url.clone();
+        let base_url = example.url.clone();
+        self.response.update(cx, |r, cx| {
+            r.set_base_url(base_url, cx);
+            r.set_state(state, cx);
+            r.set_script_report(None, cx);
+        });
+        self.notify_user(format!("Пример «{}»", example.name), cx);
+        cx.notify();
+    }
+
+    /// Removes example `ei` of saved request `idx` of collection `col`.
+    pub fn delete_example(&mut self, col: usize, idx: usize, ei: usize, cx: &mut Context<Self>) {
+        let Some(request) = self.project.collections.get_mut(col).and_then(|c| c.requests.get_mut(idx)) else {
+            return;
+        };
+        if ei >= request.examples.len() {
+            return;
+        }
+        let removed = request.examples.remove(ei);
+        let id = request.id.clone();
+        for tab in self.tabs.iter_mut().filter(|t| t.request.id == id) {
+            tab.request.examples.retain(|e| e.id != removed.id);
+        }
+        self.schedule_save(cx);
+        self.notify_user(format!("Пример «{}» удалён", removed.name), cx);
+        cx.notify();
+    }
+
     pub fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if ix < self.tabs.len() && self.active_tab != Some(ix) {
             self.set_active(Some(ix), window, cx);
@@ -1581,6 +1679,7 @@ impl Workspace {
         match ev {
             ResponseViewEvent::Retry => self.send(window, cx),
             ResponseViewEvent::Cancel => self.cancel(cx),
+            ResponseViewEvent::SaveExample => self.save_example(cx),
             // The schema editor is out of v1; nothing to navigate to yet.
             ResponseViewEvent::UpdateSchema | ResponseViewEvent::GoToSchema => {}
         }

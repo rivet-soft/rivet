@@ -1581,3 +1581,68 @@ fn sidebar_duplicate_copy_cut_paste(cx: &mut TestAppContext) {
         assert_eq!(copy.requests.iter().filter(|r| r.folder.as_deref() == Some("Orders (копия)")).count(), 1);
     });
 }
+
+#[gpui_kit::test]
+fn responses_saved_as_examples(cx: &mut TestAppContext) {
+    let (base, _) = serve_recording();
+    let mut p = project();
+    let mut search = rivet::core::RequestSpec::new("Search", Method::Get, format!("{base}/search"));
+    search.collection_id = Some(p.collections[0].id.clone());
+    p.collections[0].requests.push(search.clone());
+    let draft = rivet::core::RequestSpec::new("Draft", Method::Get, format!("{base}/draft"));
+    p.open_tabs = vec![search, draft];
+    p.active_tab = Some(0);
+    let (view, window) = open_with(cx, p);
+
+    window.update(|w, cx| w.press("cmd-enter", cx));
+    wait_sent(&view, window, 0);
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.click("response-bookmark", cx);
+        w.render_frame(cx);
+    });
+    view.read_with(window, |v, _| {
+        let examples = &v.project.collections[0].requests[0].examples;
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].name, "200 OK");
+        assert_eq!(examples[0].body, r#"{"searchId":"abc123"}"#);
+        assert!(examples[0].url.as_deref().unwrap().ends_with("/search"));
+        assert_eq!(v.notice.as_deref(), Some("Пример «200 OK» сохранён"));
+        assert!(!v.tab_unsaved(0), "the tab carries the example too");
+    });
+
+    // A draft can't keep examples.
+    window.update(|w, cx| w.click(("tab", 1usize), cx));
+    window.update(|w, cx| w.press("cmd-enter", cx));
+    wait_sent(&view, window, 1);
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.click("response-bookmark", cx);
+    });
+    view.read_with(window, |v, _| {
+        assert_eq!(v.notice.as_deref(), Some("Сначала сохраните запрос в коллекцию (⌘S)"));
+    });
+
+    // The example opens from the sidebar as the request's response.
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.click("example-0-0-0", cx);
+        w.render_frame(cx);
+    });
+    view.read_with(window, |v, _| {
+        assert_eq!(v.active_tab, Some(0));
+        match &v.tabs[0].response {
+            ResponseState::Done { response, .. } => assert_eq!(response.body, br#"{"searchId":"abc123"}"#.to_vec()),
+            other => panic!("{other:?}"),
+        }
+    });
+    window.update(|w, cx| {
+        w.click("example-delete-0-0-0", cx);
+        w.render_frame(cx);
+        assert!(w.try_find("example-0-0-0").is_none());
+    });
+    view.read_with(window, |v, _| {
+        assert!(v.project.collections[0].requests[0].examples.is_empty());
+        assert!(v.tabs[0].request.examples.is_empty());
+    });
+}

@@ -454,6 +454,9 @@ impl Workspace {
             (&c.id, &c.name, &c.folders, c.source.is_some()).hash(&mut h);
             for r in &c.requests {
                 (&r.id, &r.name, r.method as u8, &r.folder, &r.url).hash(&mut h);
+                for e in &r.examples {
+                    (&e.id, &e.name).hash(&mut h);
+                }
             }
         }
         h.finish()
@@ -805,6 +808,55 @@ impl Workspace {
                             ))
                             .test_support(),
                     );
+                    for (ei, example) in r.examples.iter().enumerate() {
+                        tree = tree.child(
+                            div()
+                                .id(format!("example-{ci}-{ri}-{ei}"))
+                                .group("example-row")
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .h(px(24.))
+                                .mx(px(4.))
+                                .pl(px(46. + 12. * request_depth as f32))
+                                .pr(px(6.))
+                                .rounded(px(5.))
+                                .cursor_pointer()
+                                .text_size(px(11.5))
+                                .text_color(p.text_dim)
+                                .hover(|s| s.bg(p.surface_hi))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_example(ci, ri, ei, window, cx)
+                                }))
+                                .child(icon(IconName::Bookmark, 11., p.text_dim))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(example.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .invisible()
+                                        .group_hover("example-row", |s| s.visible())
+                                        .child(
+                                            IconButton::new(
+                                                format!("example-delete-{ci}-{ri}-{ei}"),
+                                                IconName::X,
+                                            )
+                                            .size(11.)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.delete_example(ci, ri, ei, cx)
+                                            })),
+                                        ),
+                                )
+                                .test_support(),
+                        );
+                    }
                 }
             }
         }
