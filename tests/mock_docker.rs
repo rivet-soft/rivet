@@ -25,6 +25,7 @@ fn get(url: &str, header: Option<(&str, &str)>) -> (u16, String) {
         headers: header.map(|(k, v)| vec![(k.to_string(), v.to_string())]).unwrap_or_default(),
         body: None,
         missing_vars: vec![],
+        omit_default_headers: Vec::new(),
     };
     let r = execute(&req, &Settings::default(), &CancelToken::new()).unwrap();
     (r.status, String::from_utf8_lossy(&r.body).into_owned())

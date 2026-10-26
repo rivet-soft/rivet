@@ -180,6 +180,10 @@ pub struct RequestSpec {
     /// Documentation (plain text / Markdown), the "Docs" tab.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// Auto-generated headers switched off in the Headers tab (lowercase
+    /// names); see `auto_headers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_auto_headers: Vec<String>,
 }
 
 /// A response saved with its request.
@@ -287,6 +291,7 @@ impl RequestSpec {
             ws: WsSettings::default(),
             examples: Vec::new(),
             description: String::new(),
+            disabled_auto_headers: Vec::new(),
         }
     }
 
@@ -552,6 +557,9 @@ pub struct ResolvedRequest {
     pub body: Option<Vec<u8>>,
     /// Variables referenced but not defined in the environment.
     pub missing_vars: Vec<String>,
+    /// Default headers the client must not add (lowercase names): turned off
+    /// in the Headers tab's auto-generated rows.
+    pub omit_default_headers: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

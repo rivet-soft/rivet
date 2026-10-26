@@ -200,6 +200,7 @@ fn same_request(a: &RequestSpec, b: &RequestSpec) -> bool {
         ws,
         examples,
         description,
+        disabled_auto_headers,
     } = a;
     *id == b.id
         && *name == b.name
@@ -221,6 +222,7 @@ fn same_request(a: &RequestSpec, b: &RequestSpec) -> bool {
         && *ws == b.ws
         && *examples == b.examples
         && *description == b.description
+        && *disabled_auto_headers == b.disabled_auto_headers
 }
 
 /// Where a tab's request stands relative to its collection.
@@ -1421,6 +1423,7 @@ impl Workspace {
                     tab.request.ssl_verify = spec.ssl_verify;
                     tab.request.scripts = spec.scripts;
                     tab.request.description = spec.description;
+                    tab.request.disabled_auto_headers = spec.disabled_auto_headers;
                 }
                 self.schedule_save(cx);
                 cx.notify();

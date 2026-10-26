@@ -21,6 +21,8 @@ pub(super) struct HopRequest<'a> {
     pub url: &'a str,
     pub headers: &'a [(String, String)],
     pub body: Option<&'a [u8]>,
+    /// Client default headers not to add (lowercase names).
+    pub omit_defaults: &'a [String],
     /// Reports body bytes read so far and the `Content-Length` (0 if unknown).
     pub progress: Option<&'a super::Progress>,
 }
@@ -207,12 +209,8 @@ pub(super) async fn run_hop(
             }
         }
     }
-    for (name, value) in [
-        ("user-agent", concat!("rivet/", env!("CARGO_PKG_VERSION"))),
-        ("accept", "*/*"),
-        ("accept-encoding", "gzip, deflate, br"),
-    ] {
-        if header_value(&headers, name).is_none() {
+    for (name, value) in crate::core::auto_headers::CLIENT_DEFAULTS {
+        if header_value(&headers, name).is_none() && !hop.omit_defaults.iter().any(|o| o == name) {
             headers.push((name.into(), value.into()));
         }
     }

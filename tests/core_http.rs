@@ -423,6 +423,40 @@ fn post_json_body() {
 }
 
 #[test]
+fn switched_off_auto_headers_are_not_sent() {
+    use rivet::core::auto_headers::set_enabled;
+    let base = server();
+    let mut spec = RequestSpec::new("post", Method::Post, format!("{base}/echo"));
+    spec.body = Body::json("{}");
+    spec.auth = Auth::Bearer { token: "tok".into() };
+    let (_, json) = send(&spec, None);
+    let sent = &json["headers"];
+    assert_eq!(sent["user-agent"], concat!("rivet/", env!("CARGO_PKG_VERSION")));
+    assert_eq!(sent["accept"], "*/*");
+    assert_eq!(sent["authorization"], "Bearer tok");
+    assert_eq!(sent["content-type"], "application/json");
+
+    for name in ["User-Agent", "Accept", "Authorization", "Content-Type", "Host"] {
+        set_enabled(&mut spec, name, false);
+    }
+    let (resp, json) = send(&spec, None);
+    assert_eq!(resp.status, 200);
+    let sent = &json["headers"];
+    for name in ["user-agent", "accept", "authorization", "content-type"] {
+        assert!(sent.get(name).is_none(), "{name} was sent: {sent}");
+    }
+    // Host and Content-Length can't be switched off; Accept-Encoding stayed on.
+    assert!(sent.get("host").is_some());
+    assert_eq!(sent["content-length"], "2");
+    assert!(sent.get("accept-encoding").is_some());
+
+    // A header set by hand is sent even when the auto one is off.
+    spec.headers = vec![KeyValue::new("Accept", "application/json")];
+    let (_, json) = send(&spec, None);
+    assert_eq!(json["headers"]["accept"], "application/json");
+}
+
+#[test]
 fn multipart_form_data_uploads_selected_file() {
     let base = server();
     let dir = tempfile::tempdir().unwrap();

@@ -4,7 +4,7 @@
 //! (`{{$timestamp}}`, `{{$uuid}}`, `{{$randomInt}}`), and [`resolve`], which turns a
 //! [`RequestSpec`] into a ready-to-send [`ResolvedRequest`].
 
-use super::header_check;
+use super::{auto_headers, header_check};
 use super::types::{Auth, BodyKind, Environment, KeyValue, RequestSpec, ResolvedRequest, SendError};
 
 /// Iterates `{{ ... }}` placeholders: yields `(start, end, trimmed_name)` byte ranges
@@ -479,6 +479,9 @@ pub fn resolve(req: &RequestSpec, env: Option<&Environment>) -> Result<ResolvedR
         .filter(|(k, _)| !k.trim().is_empty())
         .collect();
 
+    // Auto Content-Type, unless the request sets one or switched it off.
+    let ct_off = auto_headers::is_disabled(req, "content-type");
+    let auto_ct = |headers: &Vec<(String, String)>| !ct_off && !has_header(headers, "content-type");
     let body = match req.body.kind {
         BodyKind::None => None,
         BodyKind::GraphQl => {
@@ -491,14 +494,14 @@ pub fn resolve(req: &RequestSpec, env: Option<&Environment>) -> Result<ResolvedR
                     SendError::InvalidBody(format!("переменные GraphQL — не JSON ({e})"))
                 })?
             };
-            if !has_header(&headers, "content-type") {
+            if auto_ct(&headers) {
                 headers.push(("Content-Type".into(), "application/json".into()));
             }
             Some(serde_json::json!({"query": query, "variables": variables}).to_string().into_bytes())
         }
         BodyKind::Json | BodyKind::Text => {
             let text = sub(&req.body.text);
-            if !has_header(&headers, "content-type") {
+            if auto_ct(&headers) {
                 let ct = if req.body.kind == BodyKind::Json {
                     "application/json"
                 } else {
@@ -522,7 +525,7 @@ pub fn resolve(req: &RequestSpec, env: Option<&Environment>) -> Result<ResolvedR
                     )
                 })
                 .collect();
-            if !has_header(&headers, "content-type") {
+            if auto_ct(&headers) {
                 headers.push((
                     "Content-Type".into(),
                     "application/x-www-form-urlencoded".into(),
@@ -566,11 +569,13 @@ pub fn resolve(req: &RequestSpec, env: Option<&Environment>) -> Result<ResolvedR
                 bytes.extend_from_slice(b"\r\n");
             }
             bytes.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-            headers.retain(|(key, _)| !key.eq_ignore_ascii_case("content-type"));
-            headers.push((
-                "Content-Type".into(),
-                format!("multipart/form-data; boundary={boundary}"),
-            ));
+            if !ct_off {
+                headers.retain(|(key, _)| !key.eq_ignore_ascii_case("content-type"));
+                headers.push((
+                    "Content-Type".into(),
+                    format!("multipart/form-data; boundary={boundary}"),
+                ));
+            }
             Some(bytes)
         }
         BodyKind::Binary => {
@@ -579,7 +584,7 @@ pub fn resolve(req: &RequestSpec, env: Option<&Environment>) -> Result<ResolvedR
                 message: "Выберите файл для бинарного тела".into(),
             })?;
             let path = sub(&path.to_string_lossy());
-            if !has_header(&headers, "content-type") {
+            if auto_ct(&headers) {
                 headers.push((
                     "Content-Type".into(),
                     file_mime(std::path::Path::new(&path)).into(),
@@ -594,7 +599,10 @@ pub fn resolve(req: &RequestSpec, env: Option<&Environment>) -> Result<ResolvedR
             headers.push(("Authorization".into(), format!("Bearer {token}")));
         }
     };
+    // The Auth tab's header, unless switched off in the Headers tab.
+    let auth_off = auto_headers::auth_header(req).is_some_and(|(name, _)| auto_headers::is_disabled(req, &name));
     match &req.auth {
+        _ if auth_off => {}
         Auth::None => {}
         Auth::Bearer { token } => {
             let t = sub(token.trim());
@@ -640,6 +648,7 @@ pub fn resolve(req: &RequestSpec, env: Option<&Environment>) -> Result<ResolvedR
         headers,
         body,
         missing_vars: missing,
+        omit_default_headers: auto_headers::omitted_defaults(req),
     })
 }
 

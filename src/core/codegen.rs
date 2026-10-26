@@ -697,6 +697,7 @@ mod tests {
             headers: vec![("Content-Type".into(), "multipart/form-data; boundary=x".into())],
             body: Some(b"--x--".to_vec()),
             missing_vars: vec![],
+            omit_default_headers: Vec::new(),
         };
         (r, resolved)
     }
@@ -755,7 +756,7 @@ mod tests {
         bin.body = Body { kind: BodyKind::Binary, file_path: Some("{{dir}}/data.bin".into()), ..Body::default() };
         let mut env = Environment::new("e", Default::default());
         env.vars = vec![KeyValue::new("dir", "/srv")];
-        let res = ResolvedRequest { method: Method::Put, url: "https://x/b".into(), headers: vec![], body: Some(vec![0, 1]), missing_vars: vec![] };
+        let res = ResolvedRequest { method: Method::Put, url: "https://x/b".into(), headers: vec![], body: Some(vec![0, 1]), missing_vars: vec![], omit_default_headers: Vec::new() };
         assert!(generate(CodeLang::NodeAxios, &bin, &res, Some(&env)).contains("fs.readFileSync(\"/srv/data.bin\")"));
         assert!(generate(CodeLang::Swift, &bin, &res, Some(&env)).contains("URL(fileURLWithPath: \"/srv/data.bin\")"));
         // `body, err := os.Open(..)` comes first: `req` still needs `:=`.

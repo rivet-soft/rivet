@@ -428,7 +428,7 @@ pub struct MockRun {
 }
 
 fn http(method: super::types::Method, url: String, timeout_ms: u64) -> Result<u16, String> {
-    let req = super::types::ResolvedRequest { method, url, headers: Vec::new(), body: None, missing_vars: Vec::new() };
+    let req = super::types::ResolvedRequest { method, url, headers: Vec::new(), body: None, missing_vars: Vec::new(), omit_default_headers: Vec::new() };
     let settings = super::types::Settings { timeout_ms, follow_redirects: false, ..Default::default() };
     super::http::execute(&req, &settings, &super::http::CancelToken::new())
         .map(|r| r.status)

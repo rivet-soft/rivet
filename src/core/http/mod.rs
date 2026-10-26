@@ -328,6 +328,7 @@ async fn run(
             url: &url,
             headers: &headers,
             body: body.as_deref(),
+            omit_defaults: &req.omit_default_headers,
             progress,
         };
         let exchange = run_hop(

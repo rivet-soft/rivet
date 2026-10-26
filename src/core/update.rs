@@ -329,6 +329,7 @@ fn get(
         headers: all,
         body: None,
         missing_vars: Vec::new(),
+        omit_default_headers: Vec::new(),
     };
     let settings = net_settings(settings, timeout_ms);
     let result = match progress {

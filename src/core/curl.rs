@@ -752,6 +752,7 @@ mod tests {
             headers: vec![("X-Q".into(), "it's".into())],
             body: Some(b"{\"a\":\"b'c\"}".to_vec()),
             missing_vars: vec![],
+            omit_default_headers: Vec::new(),
         };
         let c = to_curl(&r);
         assert_eq!(
