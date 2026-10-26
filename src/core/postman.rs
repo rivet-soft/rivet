@@ -91,6 +91,7 @@ impl PostmanImport {
                     parse_request(req, name, auth, &mut self.unsupported_bodies)
                 {
                     parsed.scripts = parse_scripts(item.get("event"));
+                    parsed.examples = parse_examples(item.get("response"));
                     if let Some(behavior) = item.get("protocolProfileBehavior") {
                         parsed.follow_redirects =
                             behavior.get("followRedirects").and_then(Value::as_bool);
@@ -151,6 +152,38 @@ fn key_values(value: Option<&Value>, key_field: &str) -> Vec<KeyValue> {
                     .description(v.get("description").map(description).unwrap_or_default())
                     .enabled(!v.get("disabled").and_then(Value::as_bool).unwrap_or(false)),
             )
+        })
+        .collect()
+}
+
+/// `item.response[]`: saved examples (status, headers, body, original URL).
+fn parse_examples(responses: Option<&Value>) -> Vec<super::types::Example> {
+    responses
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|r| {
+            let status = r.get("code").and_then(Value::as_u64).unwrap_or(200) as u16;
+            let status_text = r.get("status").and_then(Value::as_str).unwrap_or("").to_string();
+            let url = r.pointer("/originalRequest/url").and_then(|u| {
+                u.as_str()
+                    .or_else(|| u.get("raw").and_then(Value::as_str))
+                    .map(str::to_string)
+            });
+            super::types::Example {
+                id: super::types::new_id(),
+                name: r
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| super::types::Example::default_name(status, &status_text)),
+                status,
+                status_text,
+                headers: key_values(r.get("header"), "key"),
+                body: r.get("body").and_then(Value::as_str).unwrap_or("").to_string(),
+                url,
+                saved_at: 0,
+            }
         })
         .collect()
 }

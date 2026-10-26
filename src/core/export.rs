@@ -269,7 +269,34 @@ fn pm_item(request: &RequestSpec, warnings: &mut Vec<String>) -> Value {
     if let Some(body) = pm_body(request, warnings) {
         req["body"] = body;
     }
-    let mut item = json!({"name": request.name, "request": req});
+    let mut item = json!({"name": request.name, "request": req.clone()});
+    if !request.examples.is_empty() {
+        item["response"] = Value::Array(
+            request
+                .examples
+                .iter()
+                .map(|e| {
+                    let mut original = req.clone();
+                    if let Some(url) = &e.url {
+                        original["url"] = json!({"raw": url});
+                    }
+                    let json_body = e
+                        .headers
+                        .iter()
+                        .any(|h| h.key.eq_ignore_ascii_case("content-type") && h.value.contains("json"));
+                    json!({
+                        "name": e.name,
+                        "originalRequest": original,
+                        "status": e.status_text,
+                        "code": e.status,
+                        "_postman_previewlanguage": if json_body { "json" } else { "text" },
+                        "header": e.headers.iter().map(pm_kv).collect::<Vec<_>>(),
+                        "body": e.body,
+                    })
+                })
+                .collect(),
+        );
+    }
     let events = pm_events(request);
     if !events.is_empty() {
         item["event"] = Value::Array(events);
@@ -515,6 +542,44 @@ fn security_for(auth: &Auth, schemes: &mut Map<String, Value>) -> Option<Value> 
     Some(json!([{ name: [] }]))
 }
 
+/// `responses` from the saved examples (grouped by status), or a bare 200.
+fn responses_for(r: &RequestSpec) -> Value {
+    if r.examples.is_empty() {
+        return json!({"200": {"description": "OK"}});
+    }
+    let mut by_code: BTreeMap<String, Vec<&super::types::Example>> = BTreeMap::new();
+    for e in &r.examples {
+        by_code.entry(e.status.to_string()).or_default().push(e);
+    }
+    let mut out = Map::new();
+    for (code, examples) in by_code {
+        let first = examples[0];
+        let media = first
+            .headers
+            .iter()
+            .find(|h| h.key.eq_ignore_ascii_case("content-type"))
+            .map(|h| h.value.split(';').next().unwrap_or("").trim().to_string())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| "text/plain".into());
+        let value = |e: &super::types::Example| {
+            serde_json::from_str::<Value>(&e.body).unwrap_or_else(|_| json!(e.body))
+        };
+        let mut content = Map::new();
+        if examples.len() == 1 {
+            content.insert("example".into(), value(first));
+        } else {
+            let named: Map<String, Value> = examples
+                .iter()
+                .map(|e| (e.name.clone(), json!({"value": value(e)})))
+                .collect();
+            content.insert("examples".into(), Value::Object(named));
+        }
+        let description = if first.status_text.is_empty() { first.name.clone() } else { first.status_text.clone() };
+        out.insert(code, json!({"description": description, "content": {media: Value::Object(content)}}));
+    }
+    Value::Object(out)
+}
+
 pub fn to_openapi(collection: &Collection) -> (Value, Vec<String>) {
     let mut warnings = Vec::new();
     let mut paths: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
@@ -578,7 +643,7 @@ pub fn to_openapi(collection: &Collection) -> (Value, Vec<String>) {
         let mut op = json!({
             "summary": r.name,
             "operationId": operation_id(&r.name, &mut used_ids),
-            "responses": {"200": {"description": "OK"}},
+            "responses": responses_for(r),
         });
         if let Some(folder) = r.folder.as_ref().filter(|f| !f.is_empty()) {
             op["tags"] = json!([folder]);
@@ -714,6 +779,28 @@ mod tests {
         list.scripts = Scripts { pre_request: "pm.environment.set('a', 1);\nconsole.log(2);".into(), post_response: "pm.test('ok', () => {});".into() };
         list.follow_redirects = Some(false);
         list.max_redirects = Some(3);
+        list.examples = vec![
+            crate::core::types::Example {
+                id: "e1".into(),
+                name: "Two users".into(),
+                status: 200,
+                status_text: "OK".into(),
+                headers: vec![KeyValue::new("Content-Type", "application/json")],
+                body: "[{\"id\":1},{\"id\":2}]".into(),
+                url: Some("https://api.shop.dev/users?limit=10".into()),
+                saved_at: 0,
+            },
+            crate::core::types::Example {
+                id: "e2".into(),
+                name: "Unauthorized".into(),
+                status: 401,
+                status_text: "Unauthorized".into(),
+                headers: vec![],
+                body: "nope".into(),
+                url: None,
+                saved_at: 0,
+            },
+        ];
         let mut get = RequestSpec::new("Get user", Method::Get, "{{baseUrl}}/users/{{id}}");
         get.folder = Some("Users / Admin".into());
         get.auth = Auth::ApiKey { key: "X-Key".into(), value: "k".into(), in_query: false };
@@ -792,6 +879,12 @@ mod tests {
         assert_eq!(list.scripts, c.requests[0].scripts);
         assert_eq!(list.folder.as_deref(), Some("Users"));
         assert_eq!(list.follow_redirects, Some(false));
+        let strip = |e: &crate::core::types::Example| (e.name.clone(), e.status, e.status_text.clone(), e.headers.clone(), e.body.clone());
+        assert_eq!(
+            list.examples.iter().map(strip).collect::<Vec<_>>(),
+            c.requests[0].examples.iter().map(strip).collect::<Vec<_>>()
+        );
+        assert_eq!(list.examples[0].url.as_deref(), Some("https://api.shop.dev/users?limit=10"));
         assert_eq!(list.max_redirects, Some(3));
         assert_eq!(by_name("Get user").auth, c.requests[1].auth);
         assert_eq!(by_name("Get user").folder.as_deref(), Some("Users / Admin"));
@@ -841,6 +934,9 @@ mod tests {
         assert_eq!(params[2]["x-rivet-disabled"], true);
         assert_eq!(list["security"], json!([{"bearerAuth": []}]));
         assert_eq!(list["x-rivet-redirects"], json!({"follow": false, "max": 3}));
+        assert_eq!(list["responses"]["200"]["content"]["application/json"]["example"], json!([{"id": 1}, {"id": 2}]));
+        assert_eq!(list["responses"]["401"]["content"]["text/plain"]["example"], "nope");
+        assert_eq!(list["responses"]["401"]["description"], "Unauthorized");
         assert!(list["x-rivet-scripts"]["pre_request"].as_str().unwrap().contains("console.log"));
         let get = &doc["paths"]["/users/{id}"]["get"];
         assert_eq!(get["parameters"][0], json!({"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "example": "42"}));

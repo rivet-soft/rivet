@@ -161,6 +161,55 @@ pub struct RequestSpec {
     /// WebSocket-only settings: saved message templates.
     #[serde(default, skip_serializing_if = "WsSettings::is_empty")]
     pub ws: WsSettings,
+    /// Saved responses ("Сохранить как пример"), like Postman's examples.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<Example>,
+}
+
+/// A response saved with its request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Example {
+    pub id: String,
+    pub name: String,
+    pub status: u16,
+    #[serde(default)]
+    pub status_text: String,
+    #[serde(default)]
+    pub headers: Vec<KeyValue>,
+    /// Body as text (non-UTF-8 bytes are replaced).
+    #[serde(default)]
+    pub body: String,
+    /// Absolute URL the response came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Unix seconds.
+    #[serde(default)]
+    pub saved_at: u64,
+}
+
+impl Example {
+    /// Largest body kept in an example: they live in project.json.
+    pub const MAX_BODY: usize = 5 * 1024 * 1024;
+
+    /// "200 OK" style default name.
+    pub fn default_name(status: u16, status_text: &str) -> String {
+        if status_text.is_empty() { status.to_string() } else { format!("{status} {status_text}") }
+    }
+
+    /// The example as a response (no timings: nothing was sent).
+    pub fn to_response(&self) -> ResponseData {
+        ResponseData {
+            status: self.status,
+            status_text: self.status_text.clone(),
+            http_version: String::new(),
+            remote_addr: None,
+            headers: self.headers.iter().map(|h| (h.key.clone(), h.value.clone())).collect(),
+            redirect_history: self.url.iter().cloned().collect(),
+            hops: Vec::new(),
+            body: self.body.clone().into_bytes(),
+            timings: Timings::default(),
+        }
+    }
 }
 
 /// What a [`RequestSpec`] sends.
@@ -218,6 +267,7 @@ impl RequestSpec {
             scripts: Scripts::default(),
             kind: RequestKind::Http,
             ws: WsSettings::default(),
+            examples: Vec::new(),
         }
     }
 
