@@ -76,26 +76,49 @@ fn toggles_change_mcp_settings(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(window, |v, _| v.settings().mcp), McpSettings::default());
 
     window.update(|w, cx| {
-        w.click("settings-mcp-readonly", cx);
+        click_in_view(w, cx, "settings-mcp-readonly");
         w.render_frame(cx);
-        w.click("settings-mcp-send", cx);
+        click_in_view(w, cx, "settings-mcp-send");
         w.render_frame(cx);
         assert!(w.try_find("settings-mcp-secrets-warning").is_none());
-        w.click("settings-mcp-secrets", cx);
+        click_in_view(w, cx, "settings-mcp-secrets");
         w.render_frame(cx);
         assert!(w.try_find("settings-mcp-secrets-warning").is_some());
-        w.click("settings-mcp-enabled", cx);
+        for id in ["settings-mcp-mocks", "settings-mcp-files", "settings-mcp-history"] {
+            click_in_view(w, cx, id);
+            w.render_frame(cx);
+        }
+        click_in_view(w, cx, "settings-mcp-enabled");
         w.render_frame(cx);
     });
-    let expected = McpSettings { enabled: false, read_only: true, allow_send: false, reveal_secrets: true };
+    let expected = McpSettings {
+        enabled: false,
+        read_only: true,
+        allow_send: false,
+        reveal_secrets: true,
+        allow_mocks: false,
+        allow_files: false,
+        allow_history: false,
+    };
     assert_eq!(view.read_with(window, |v, _| v.settings().mcp), expected);
     let events = events.borrow();
-    assert_eq!(events.len(), 4);
+    assert_eq!(events.len(), 7);
     assert!(events[0].mcp.read_only && events[0].mcp.allow_send);
-    assert_eq!(events[3].mcp, expected);
+    assert_eq!(events[6].mcp, expected);
 
     // While MCP is off the other toggles are disabled.
     window.update(|w, cx| {
+        // The panel is taller than the test window: bring the MCP toggles in.
+        for _ in 0..60 {
+            let y = w.find("settings-mcp-readonly").bounds().origin.y.as_f32();
+            let h = w.find("settings-mcp-history").bounds().origin.y.as_f32();
+            let view_h = w.viewport_size().height.as_f32();
+            if y > 0. && h + 40. < view_h {
+                break;
+            }
+            let dy = if h + 40. >= view_h { -60. } else { 60. };
+            w.scroll("settings-panel", ScrollDelta::Pixels(point(px(0.), px(dy))), cx);
+        }
         w.click("settings-mcp-readonly", cx);
         w.render_frame(cx);
     });
@@ -220,4 +243,19 @@ fn activity_is_listed_and_cleared(cx: &mut TestAppContext) {
     assert!(view.read_with(window, |v, _| v.activity.is_empty()));
     assert!(mcp_activity::read(&log, 10).is_empty());
     view.update(window, |v, cx| v.set_visible(false, cx));
+}
+
+/// Scrolls the settings panel until `id` is on screen, then clicks it (the
+/// panel is taller than the test window).
+fn click_in_view(w: &mut gpui_kit::Window, cx: &mut gpui_kit::App, id: &'static str) {
+    for _ in 0..80 {
+        let y = w.find(id).bounds().origin.y.as_f32();
+        let view_h = w.viewport_size().height.as_f32();
+        if y > 10. && y + 40. < view_h {
+            break;
+        }
+        let dy = if y + 40. >= view_h { -50. } else { 50. };
+        w.scroll("settings-panel", ScrollDelta::Pixels(point(px(0.), px(dy))), cx);
+    }
+    w.click(id, cx);
 }

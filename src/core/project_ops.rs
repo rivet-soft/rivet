@@ -243,6 +243,14 @@ pub fn spec_for_request(project: &Project, request: &RequestSpec) -> Option<Spec
     project.spec_path.as_ref().and_then(|p| Spec::load(p).ok())
 }
 
+/// OpenAPI spec of a collection: its own linked file, else the project's.
+pub fn spec_for_collection(project: &Project, collection: &Collection) -> Option<Spec> {
+    match &collection.source {
+        Some(source) => Spec::load(source).ok(),
+        None => project.spec_path.as_ref().and_then(|p| Spec::load(p).ok()),
+    }
+}
+
 /// Response schema label and mismatches for a request created from a spec.
 pub fn check_schema(spec: &Spec, request: &RequestSpec, response: &ResponseData) -> (Option<String>, Vec<Mismatch>) {
     let Some(spec_ref) = &request.spec_ref else {

@@ -196,6 +196,13 @@ fn protocol_basics_and_tool_list() {
         "import_spec",
         "export_collection",
         "run_collection",
+        "save_example",
+        "delete_example",
+        "generate_code",
+        "mock_status",
+        "start_mock",
+        "stop_mock",
+        "reload_mock",
     ] {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
     }
@@ -619,4 +626,97 @@ fn import_spec_reads_har() {
     assert_eq!(imported["format"], "har");
     assert_eq!(imported["collection"], "trace");
     assert_eq!(imported["request_count"], 1);
+}
+
+#[test]
+fn examples_new_fields_and_code_over_mcp() {
+    let base = server();
+    let dir = tempfile::tempdir().unwrap();
+    let path = seed(dir.path(), &base);
+    let mut mcp = Mcp::start(&path);
+
+    // New request fields: description, path variables, graphql body, settings.
+    let saved = mcp.ok("save_request", json!({
+        "collection": "Shop", "name": "User", "method": "POST", "url": "{{baseUrl}}/users/:id",
+        "description": "Loads a user", "path_variables": {"id": "42"},
+        "body": {"kind": "graphql", "query": "{ me { id } }", "variables": {"a": 1}},
+        "request_timeout_ms": 1500, "ssl_verify": false
+    }));
+    let id = saved["id"].as_str().unwrap().to_string();
+    let r = mcp.ok("get_request", json!({"id": id}));
+    let req = &r["request"];
+    assert_eq!(req["description"], "Loads a user");
+    assert_eq!(req["path_vars"][0]["value"], "42");
+    assert_eq!(req["body"]["kind"], "graphql");
+    assert_eq!(req["timeout_ms"], 1500);
+    assert_eq!(req["ssl_verify"], false);
+
+    // A hand-written example (a mock response), then one from a real send.
+    let ex = mcp.ok("save_example", json!({"request_id": id, "name": "found", "status": 200, "body": {"id": 42}}));
+    assert_eq!(ex["example"]["name"], "found");
+    let sent = mcp.ok("save_example", json!({"request_id": "Me", "collection": "Shop"}));
+    assert_eq!(sent["example"]["status"], 200);
+    let stored = store::load(&path).unwrap();
+    let user = stored.collections[0].requests.iter().find(|r| r.id == id).unwrap();
+    assert_eq!(user.examples[0].body, "{\n  \"id\": 42\n}");
+    let me = stored.collections[0].requests.iter().find(|r| r.name == "Me").unwrap();
+    assert!(me.examples[0].body.contains("\"path\":\"/me\""), "{}", me.examples[0].body);
+    let gone = mcp.ok("delete_example", json!({"request_id": id, "example": "found"}));
+    assert_eq!(gone["examples_left"], 0);
+    assert!(mcp.err("delete_example", json!({"request_id": id, "example": "nope"})).contains("No example"));
+
+    // Code snippets.
+    let code = mcp.ok("generate_code", json!({"request_id": "Me", "collection": "Shop", "language": "python-requests"}));
+    assert!(code["code"].as_str().unwrap().contains("import requests"));
+    assert!(code["code"].as_str().unwrap().contains(&format!("{base}/me")));
+    assert!(mcp.err("generate_code", json!({"language": "cobol", "url": "http://x"})).contains("Unknown language"));
+}
+
+#[test]
+fn settings_gate_mocks_files_and_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = seed(dir.path(), "http://127.0.0.1:9");
+    let mut mcp = Mcp::start(&path);
+    set_mcp(&path, |m| {
+        m.allow_mocks = false;
+        m.allow_files = false;
+        m.allow_history = false;
+    });
+    assert!(mcp.err("mock_status", json!({})).contains("Управлять моками"));
+    assert!(mcp.err("start_mock", json!({"collection": "Shop"})).contains("Управлять моками"));
+    assert!(mcp.err("get_history", json!({})).contains("Читать историю"));
+    let file = dir.path().join("x.rivet.json");
+    assert!(mcp.err("export_collection", json!({"collection": "Shop", "path": file})).contains("Записывать файлы"));
+    assert!(mcp.ok("export_collection", json!({"collection": "Shop"}))["content"].is_string(), "inline still works");
+    set_mcp(&path, |m| m.read_only = true);
+    assert!(mcp.err("save_example", json!({"request_id": "Me", "status": 200})).contains("Только чтение"));
+}
+
+/// Mocks over MCP with real Docker: `cargo test --test mcp mcp_mocks -- --ignored`.
+#[test]
+#[ignore]
+fn mcp_mocks_with_docker() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = seed(dir.path(), "http://127.0.0.1:9");
+    let mut mcp = Mcp::start(&path);
+    mcp.ok("save_example", json!({"request_id": "Me", "collection": "Shop", "name": "me", "status": 200, "body": {"me": true}}));
+    let started = mcp.ok("start_mock", json!({"collection": "Shop"}));
+    let url = started["url"].as_str().unwrap().to_string();
+    let get = |u: &str| {
+        let out = Command::new("curl").args(["-s", "-o", "-", "-w", " %{http_code}", u]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let body = get(&format!("{url}/me"));
+    let status = mcp.ok("mock_status", json!({"collection": "Shop"}));
+    // Change the example, reload, stop.
+    mcp.ok("delete_example", json!({"request_id": "Me", "collection": "Shop", "example": "me"}));
+    mcp.ok("save_example", json!({"request_id": "Me", "collection": "Shop", "name": "v2", "status": 201, "body": "two"}));
+    mcp.ok("reload_mock", json!({"collection": "Shop"}));
+    let after = get(&format!("{url}/me"));
+    let stopped = mcp.ok("stop_mock", json!({"collection": "Shop"}));
+    assert!(body.contains("\"me\": true") && body.ends_with(" 200"), "{body}");
+    assert_eq!(status["mocks"][0]["url"], url);
+    assert_eq!(after, "two 201");
+    assert_eq!(stopped["stopped"], true);
+    assert_eq!(mcp.ok("mock_status", json!({"collection": "Shop"}))["mocks"].as_array().unwrap().len(), 0);
 }

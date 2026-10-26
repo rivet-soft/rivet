@@ -26,6 +26,10 @@ const INSTRUCTIONS: &str = "Rivet is an HTTP client. Saved requests live in coll
 `{{variables}}` resolve from the active environment overlaid with collection variables. \
 Use list_collections / list_requests to discover ids, send_request to execute (scripts run, \
 variable changes and history are saved like in the app), run_collection for chained flows. \
+Mock servers: save_example defines a response for a saved request (or sends it and keeps the real one); \
+start_mock runs the collection's mock in Docker (answers with examples, else the OpenAPI responses), \
+reload_mock picks up new examples, stop_mock / mock_status manage them. generate_code renders a request in 12 languages; \
+export_collection / import_spec move collections (Rivet, Postman, OpenAPI, HAR). \
 Secret-looking values are masked unless reveal_secrets is true (and the user allowed it in Settings → MCP). Destructive requests against \
 an environment marked production need confirm_production: true — ask the user first.";
 

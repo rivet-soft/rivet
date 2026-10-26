@@ -452,11 +452,25 @@ pub struct McpSettings {
     pub allow_send: bool,
     /// The `reveal_secrets` tool argument is honoured; otherwise secrets stay masked.
     pub reveal_secrets: bool,
+    /// Mock servers: status, start / stop / reload containers in Docker.
+    pub allow_mocks: bool,
+    /// Writing files on disk (export_collection with a path).
+    pub allow_files: bool,
+    /// Reading the request history (get_history).
+    pub allow_history: bool,
 }
 
 impl Default for McpSettings {
     fn default() -> Self {
-        Self { enabled: true, read_only: false, allow_send: true, reveal_secrets: false }
+        Self {
+            enabled: true,
+            read_only: false,
+            allow_send: true,
+            reveal_secrets: false,
+            allow_mocks: true,
+            allow_files: true,
+            allow_history: true,
+        }
     }
 }
 

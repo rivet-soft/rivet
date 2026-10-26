@@ -114,15 +114,21 @@ pub fn body(value: &Value) -> Result<Body, String> {
         }
         Value::Object(obj) if obj.contains_key("kind") => {
             let kind: BodyKind = serde_json::from_value(obj["kind"].clone())
-                .map_err(|_| "body.kind must be none, json, text, form, multipart or binary".to_string())?;
-            let text = match obj.get("text").or_else(|| obj.get("json")) {
+                .map_err(|_| "body.kind must be none, json, text, form, multipart, binary or graphql".to_string())?;
+            let text = match obj.get("text").or_else(|| obj.get("json")).or_else(|| obj.get("query")) {
                 None | Some(Value::Null) => String::new(),
                 Some(Value::String(s)) => s.clone(),
                 Some(other) => serde_json::to_string_pretty(other).unwrap_or_default(),
             };
             let form = obj.get("form").map(|f| key_values(f, "body.form")).transpose()?.unwrap_or_default();
             let file_path = obj.get("file_path").and_then(Value::as_str).map(std::path::PathBuf::from);
-            Ok(Body { kind, text, form, file_path, ..Body::default() })
+            // GraphQL variables: a JSON object or JSON text.
+            let variables = match obj.get("variables") {
+                None | Some(Value::Null) => String::new(),
+                Some(Value::String(s)) => s.clone(),
+                Some(other) => serde_json::to_string_pretty(other).unwrap_or_default(),
+            };
+            Ok(Body { kind, text, form, file_path, variables })
         }
         other => Ok(Body::json(serde_json::to_string_pretty(other).unwrap_or_default())),
     }
@@ -194,6 +200,22 @@ pub fn apply_request_fields(request: &mut RequestSpec, args: &Args) -> Result<()
     }
     if args.0.contains_key("max_redirects") {
         request.max_redirects = args.u64("max_redirects")?.map(|n| n.min(u32::MAX as u64) as u32);
+    }
+    if let Some(description) = args.get("description") {
+        request.description = scalar_text(description);
+    }
+    if let Some(v) = args.0.get("path_variables") {
+        // Values for `:name` segments; rows follow the URL's names.
+        let given = key_values(v, "path_variables")?;
+        request.path_vars = crate::core::vars::sync_path_vars(&request.url, &given);
+    } else if args.0.contains_key("url") {
+        request.path_vars = crate::core::vars::sync_path_vars(&request.url, &request.path_vars);
+    }
+    if args.0.contains_key("request_timeout_ms") {
+        request.timeout_ms = args.u64("request_timeout_ms")?.map(|n| n.clamp(1, 3_600_000));
+    }
+    if args.0.contains_key("ssl_verify") {
+        request.ssl_verify = args.bool("ssl_verify")?;
     }
     Ok(())
 }

@@ -126,13 +126,17 @@ Claude Desktop (`claude_desktop_config.json`), Cursor (`.cursor/mcp.json`) — �
 | `import_spec` | импорт OpenAPI / Swagger / Postman / HAR / Rivet в новую коллекцию |
 | `export_collection` | экспорт коллекции в Rivet (без потерь), Postman v2.1 или OpenAPI 3 — в файл или в ответ (секреты замаскированы) |
 | `run_collection` | прогон коллекции или папки по порядку с передачей переменных между запросами; `stop_on_failure`, `environment`, `delay_ms`; отчёт с тестами и итогами |
+| `save_example` / `delete_example` | пример ответа сохранённого запроса — то, чем отвечает мок: вручную (`status`, `headers`, `body`) или отправкой запроса с сохранением настоящего ответа |
+| `start_mock` / `stop_mock` / `reload_mock` / `mock_status` | мок-сервер коллекции в Docker (WireMock): запуск, остановка, перезагрузка заглушек после новых примеров, статус; моки, запущенные в окне и через MCP, видят друг друга |
+| `generate_code` | код запроса: cURL, HTTPie, wget, Python, JavaScript, Node.js, Go, Rust, PHP, C#, Java, Swift |
 
 Как в приложении, `send_request` и `run_collection` выполняют скрипты, сохраняют переменные, выставленные `pm.environment.set` / `pm.collectionVariables.set`, и пишут историю.
 
 Безопасность:
 - «Разрешить MCP» выключено — `initialize` и `tools/list` работают, но любой вызов инструмента возвращает ошибку «MCP отключён в настройках Rivet».
-- «Только чтение» — `save_request`, `set_variable`, `unset_variable`, `set_active_environment`, `create_environment`, `import_spec` отклоняются; `send_request` и `run_collection` выполняются (если разрешена отправка), но не сохраняют историю и переменные из скриптов (в ответе `persisted: false`).
+- «Только чтение» — `save_request`, `set_variable`, `unset_variable`, `set_active_environment`, `create_environment`, `import_spec`, `save_example`, `delete_example` отклоняются; `send_request` и `run_collection` выполняются (если разрешена отправка), но не сохраняют историю и переменные из скриптов (в ответе `persisted: false`).
 - «Разрешить отправку запросов» выключено — `send_request` и `run_collection` отклоняются.
+- «Управлять моками» выключено — `mock_status`, `start_mock`, `stop_mock`, `reload_mock` отклоняются; «Записывать файлы» выключено — `export_collection` с `path` отклоняется (без `path` работает); «Читать историю запросов» выключено — `get_history` отклоняется. `save_example` / `delete_example` подчиняются «Только чтение».
 - Значения с секретными ключами (`token`, `password`, `secret`, `apikey`, `api_key`, `Authorization`…) в выдаче заменяются на `••••••••`. Аргумент `reveal_secrets: true` учитывается, только если включено «Показывать секреты ассистенту». Маска, отправленная обратно в `save_request`, сохраняет прежнее значение. Тела ответов и логи скриптов не маскируются.
 - В окружении с флагом **Production** POST / PUT / PATCH / DELETE (и `run_collection` с такими запросами) отклоняются, пока не передан `confirm_production: true` — ассистент должен спросить вас.
 - Каждый вызов читает `project.json` заново и записывает его атомарно; если файл изменился за время вызова, изменения сливаются.

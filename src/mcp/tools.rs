@@ -14,7 +14,8 @@ use crate::core::project_ops::{self, find_collection, find_env, find_request, is
 use crate::core::mcp_activity::{self, ActivityEntry};
 use crate::core::secrets;
 use crate::core::{
-    Collection, EnvColor, Environment, KeyValue, McpSettings, Project, RequestSpec, import, runner, store,
+    Collection, EnvColor, Environment, Example, KeyValue, McpSettings, Project, RequestSpec, import, mock,
+    runner, store,
 };
 
 /// Default cap for response bodies returned to the model.
@@ -48,10 +49,12 @@ pub struct Server {
 pub const DISABLED_MESSAGE: &str = "MCP отключён в настройках Rivet (Настройки → MCP)";
 
 /// Tools that change the project.
-const MUTATING_TOOLS: [&str; 6] =
-    ["save_request", "set_variable", "unset_variable", "set_active_environment", "create_environment", "import_spec"];
+const MUTATING_TOOLS: [&str; 8] =
+    ["save_request", "set_variable", "unset_variable", "set_active_environment", "create_environment", "import_spec", "save_example", "delete_example"];
 /// Tools that send HTTP requests.
 const SENDING_TOOLS: [&str; 2] = ["send_request", "run_collection"];
+/// Tools that run Docker (Settings → MCP → «Управлять моками»).
+const MOCK_TOOLS: [&str; 4] = ["mock_status", "start_mock", "stop_mock", "reload_mock"];
 
 const READ_ONLY_NOTE: &str = "Rivet MCP is in read-only mode (Settings → MCP): variable changes and history were not saved.";
 
@@ -82,7 +85,7 @@ fn request_props() -> serde_json::Map<String, Value> {
         "params": kv("Query parameters appended to the URL"),
         "headers": kv("Request headers"),
         "body": {
-            "description": "Body. A JSON object/array is sent as JSON; a string is sent as JSON if it parses, else as text; or {kind: none|json|text|form|multipart|binary, text?, form?, file_path?}.",
+            "description": "Body. A JSON object/array is sent as JSON; a string is sent as JSON if it parses, else as text; or {kind: none|json|text|form|multipart|binary|graphql, text?, form?, file_path?, query?, variables?} (graphql: query + JSON variables).",
             "anyOf": [{"type": "object"}, {"type": "array"}, {"type": "string"}, {"type": "null"}]
         },
         "auth": {
@@ -101,7 +104,11 @@ fn request_props() -> serde_json::Map<String, Value> {
             "properties": {"pre_request": {"type": "string"}, "post_response": {"type": "string"}}
         },
         "follow_redirects": {"type": ["boolean", "null"], "description": "Override the app's redirect setting for this request (null = use the app default)"},
-        "max_redirects": {"type": ["integer", "null"], "minimum": 0}
+        "max_redirects": {"type": ["integer", "null"], "minimum": 0},
+        "description": {"type": "string", "description": "Documentation of the request (Markdown), shown in its Docs tab"},
+        "path_variables": kv("Values of `:name` path segments of the URL (Postman Path Variables), e.g. {\"id\": \"42\"} for /users/:id"),
+        "request_timeout_ms": {"type": ["integer", "null"], "minimum": 1, "description": "Timeout stored with the request (null = the app's)"},
+        "ssl_verify": {"type": ["boolean", "null"], "description": "Verify TLS certificates for this request (null = the app's setting)"}
     });
     props.as_object().cloned().unwrap_or_default()
 }
@@ -288,6 +295,87 @@ pub fn definitions() -> Vec<Value> {
             false,
         ),
         tool(
+            "save_example",
+            "Save example",
+            "Save a response as an example of a saved request. Examples are what mock servers answer with (start_mock), so this is how to define mock responses. Give status/headers/body explicitly, or omit them to send the request now and save the real response (needs sending allowed).",
+            json!({
+                "request_id": {"type": "string", "description": "Saved request (id, unique name or \"Collection / Folder / Name\")"},
+                "collection": {"type": "string", "description": "Collection id or name to disambiguate request_id"},
+                "name": {"type": "string", "description": "Example name (default \"<status> <text>\"); mocks pick it with the x-mock-response-name header"},
+                "status": {"type": "integer", "minimum": 100, "maximum": 599},
+                "status_text": {"type": "string"},
+                "headers": {"description": "Response headers: array of {key, value} or an object", "anyOf": [{"type": "array"}, {"type": "object"}]},
+                "body": {"description": "Response body: a string, or JSON (stored pretty-printed)"},
+                "environment": {"type": "string", "description": "When sending: environment id/name instead of the active one"},
+                "confirm_production": {"type": "boolean", "description": "When sending to a production environment with POST/PUT/PATCH/DELETE. Ask the user first."}
+            }),
+            &["request_id"],
+            false,
+        ),
+        tool(
+            "delete_example",
+            "Delete example",
+            "Delete a saved example (mock response) of a request, by example id or name.",
+            json!({
+                "request_id": {"type": "string"},
+                "collection": {"type": "string"},
+                "example": {"type": "string", "description": "Example id or name"}
+            }),
+            &["request_id", "example"],
+            false,
+        ),
+        tool(
+            "generate_code",
+            "Generate code",
+            "The request as a code snippet: curl, httpie, wget, python-requests, js-fetch, node-axios, go, rust-reqwest, php-curl, csharp, java-okhttp or swift. Variables are resolved with the environment; secrets are masked unless reveal_secrets.",
+            json!({
+                "request_id": {"type": "string", "description": "Saved request; or give method/url/... for an ad-hoc one"},
+                "collection": {"type": "string"},
+                "language": {"type": "string", "enum": ["curl", "httpie", "wget", "python-requests", "js-fetch", "node-axios", "go", "rust-reqwest", "php-curl", "csharp", "java-okhttp", "swift"]},
+                "environment": {"type": "string"},
+                "method": {"type": "string"},
+                "url": {"type": "string"},
+                "headers": {"anyOf": [{"type": "array"}, {"type": "object"}]},
+                "params": {"anyOf": [{"type": "array"}, {"type": "object"}]},
+                "body": {},
+                "reveal_secrets": reveal_prop()
+            }),
+            &["language"],
+            true,
+        ),
+        tool(
+            "mock_status",
+            "Mock status",
+            "Docker availability and the mock servers running (started from the app or over MCP): collection, URL, engine.",
+            json!({"collection": {"type": "string", "description": "Only this collection (id or name)"}}),
+            &[],
+            true,
+        ),
+        tool(
+            "start_mock",
+            "Start mock",
+            "Start a mock server for a collection in Docker (engine and port from Settings → Моки). It answers each request with its saved examples, else the responses its OpenAPI operation declares, else 501. Pick an example with the x-mock-response-name / x-mock-response-code request headers. Returns the URL; the first start may pull the image (can take a minute).",
+            json!({"collection": {"type": "string", "description": "Collection id or name"}}),
+            &["collection"],
+            false,
+        ),
+        tool(
+            "stop_mock",
+            "Stop mock",
+            "Stop a collection's running mock server.",
+            json!({"collection": {"type": "string"}}),
+            &["collection"],
+            false,
+        ),
+        tool(
+            "reload_mock",
+            "Reload mock",
+            "Rebuild a running mock's stubs from the collection (after save_example etc.) without restarting it.",
+            json!({"collection": {"type": "string"}}),
+            &["collection"],
+            false,
+        ),
+        tool(
             "run_collection",
             "Run collection",
             "Run a collection's requests (or one folder) in order, carrying variables set by scripts to the next request. Returns per-request status, tests and errors plus totals; variable changes and history are saved.",
@@ -324,6 +412,13 @@ pub fn tool_names() -> &'static [&'static str] {
         "import_spec",
         "export_collection",
         "run_collection",
+        "save_example",
+        "delete_example",
+        "generate_code",
+        "mock_status",
+        "start_mock",
+        "stop_mock",
+        "reload_mock",
     ]
 }
 
@@ -404,6 +499,16 @@ impl Server {
                 "Отправка запросов через MCP запрещена в настройках Rivet (Настройки → MCP → «Разрешить отправку запросов»): {name} недоступен."
             ));
         }
+        if !self.policy.allow_mocks && MOCK_TOOLS.contains(&name) {
+            return Err(format!(
+                "Управление моками через MCP запрещено в настройках Rivet (Настройки → MCP → «Управлять моками»): {name} недоступен."
+            ));
+        }
+        if !self.policy.allow_history && name == "get_history" {
+            return Err(
+                "Чтение истории через MCP запрещено в настройках Rivet (Настройки → MCP → «Читать историю запросов»).".into(),
+            );
+        }
         let args = Args::new(arguments);
         match name {
             "list_collections" => self.list_collections(),
@@ -420,6 +525,13 @@ impl Server {
             "unset_variable" => self.set_variable(&args, false),
             "import_spec" => self.import_spec(&args),
             "export_collection" => self.export_collection(&args),
+            "save_example" => self.save_example(&args),
+            "delete_example" => self.delete_example(&args),
+            "generate_code" => self.generate_code(&args),
+            "mock_status" => self.mock_status(&args),
+            "start_mock" => self.start_mock(&args),
+            "stop_mock" => self.stop_mock(&args),
+            "reload_mock" => self.reload_mock(&args),
             "run_collection" => self.run_collection(&args),
             other => Err(format!("Unknown tool: {other}")),
         }
@@ -968,6 +1080,9 @@ impl Server {
         });
         match path {
             Some(path) => {
+                if !self.policy.allow_files {
+                    return Err("Writing files over MCP is disabled (Settings → MCP → «Записывать файлы»): omit path to get the content back".into());
+                }
                 if path.is_relative() {
                     return Err("path must be absolute".into());
                 }
@@ -978,6 +1093,238 @@ impl Server {
             None => value["content"] = json!(exported.text),
         }
         Ok(value.into())
+    }
+
+    fn save_example(&self, args: &Args) -> ToolResult {
+        let base = self.load()?;
+        let (ci, ri) = find_request(&base, args.req_str("request_id")?, args.str("collection")?)?;
+        let manual = args.has("status") || args.has("body") || args.has("headers");
+        let example = if manual {
+            let status = args.u64("status")?.unwrap_or(200).clamp(100, 599) as u16;
+            let status_text = args.str("status_text")?.unwrap_or("").to_string();
+            let headers = match args.0.get("headers") {
+                Some(v) => args::key_values(v, "headers")?,
+                None => Vec::new(),
+            };
+            let body = match args.0.get("body") {
+                None | Some(Value::Null) => String::new(),
+                Some(Value::String(s)) => s.clone(),
+                Some(other) => serde_json::to_string_pretty(other).unwrap_or_default(),
+            };
+            Example {
+                id: crate::core::new_id(),
+                name: String::new(),
+                status,
+                status_text,
+                headers,
+                body,
+                url: None,
+                saved_at: project_ops::now_secs(),
+            }
+        } else {
+            // Send it now and keep the real response.
+            if !self.policy.allow_send {
+                return Err("Sending is disabled in Settings → MCP: pass status/body to save an example by hand".into());
+            }
+            let mut request = base.collections[ci].requests[ri].clone();
+            request.collection_id = Some(base.collections[ci].id.clone());
+            let env = match args.str("environment")? {
+                Some(name) => Some(base.environments[find_env(&base, name)?].clone()),
+                None => project_ops::active_env(&base).cloned(),
+            };
+            if let Some(env) = env.as_ref().filter(|e| e.production) {
+                if is_destructive(request.method) && !args.flag("confirm_production")? {
+                    return Err(production_refusal(env, &format!("{} {}", request.method.full_label(), request.url)));
+                }
+            }
+            let out = runner::run(project_ops::run_input(&base, &request, env, &CancelToken::new(), Some(&self.sessions)));
+            let response = out.result.map_err(|e| format!("The request failed, nothing saved: {e}"))?;
+            if response.body.len() > Example::MAX_BODY {
+                return Err("The response is over 5 MB; examples are kept in project.json".into());
+            }
+            Example {
+                id: crate::core::new_id(),
+                name: String::new(),
+                status: response.status,
+                status_text: response.status_text.clone(),
+                headers: response.headers.iter().map(|(k, v)| KeyValue::new(k, v)).collect(),
+                body: String::from_utf8_lossy(&response.body).into_owned(),
+                url: out.resolved_url,
+                saved_at: project_ops::now_secs(),
+            }
+        };
+        let mut example = example;
+        example.name = match args.str("name")? {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => Example::default_name(example.status, &example.status_text),
+        };
+        let mut project = base.clone();
+        project.collections[ci].requests[ri].examples.push(example.clone());
+        self.save(&base, &project)?;
+        Ok(json!({
+            "request": project.collections[ci].requests[ri].name,
+            "collection": project.collections[ci].name,
+            "example": {"id": example.id, "name": example.name, "status": example.status, "body_chars": example.body.len()},
+            "examples": project.collections[ci].requests[ri].examples.len(),
+            "hint": "A running mock picks it up after reload_mock (the app reloads its own mocks automatically).",
+        })
+        .into())
+    }
+
+    fn delete_example(&self, args: &Args) -> ToolResult {
+        let base = self.load()?;
+        let (ci, ri) = find_request(&base, args.req_str("request_id")?, args.str("collection")?)?;
+        let key = args.req_str("example")?;
+        let mut project = base.clone();
+        let examples = &mut project.collections[ci].requests[ri].examples;
+        let ix = examples
+            .iter()
+            .position(|e| e.id == key)
+            .or_else(|| examples.iter().position(|e| e.name == key))
+            .ok_or_else(|| format!("No example '{key}' on this request"))?;
+        let removed = examples.remove(ix);
+        self.save(&base, &project)?;
+        Ok(json!({"deleted": {"id": removed.id, "name": removed.name}, "examples_left": project.collections[ci].requests[ri].examples.len()}).into())
+    }
+
+    fn generate_code(&self, args: &Args) -> ToolResult {
+        let project = self.load()?;
+        let reveal = self.reveal(args)?;
+        let language = args.req_str("language")?;
+        let lang = crate::core::codegen::CodeLang::from_id(language)
+            .ok_or_else(|| format!("Unknown language '{language}'"))?;
+        let mut request = match args.str("request_id")? {
+            Some(id) => {
+                let (ci, ri) = find_request(&project, id, args.str("collection")?)?;
+                let mut r = project.collections[ci].requests[ri].clone();
+                r.collection_id = Some(project.collections[ci].id.clone());
+                r
+            }
+            None => {
+                if !args.has("url") {
+                    return Err("Pass request_id or at least url".into());
+                }
+                RequestSpec::untitled()
+            }
+        };
+        args::apply_request_fields(&mut request, args)?;
+        if !reveal {
+            secrets::mask_request(&mut request);
+        }
+        let env = match args.str("environment")? {
+            Some(name) => Some(project.environments[find_env(&project, name)?].clone()),
+            None => project_ops::active_env(&project).cloned(),
+        };
+        let (scope_env, collection_vars) = (env, project_ops::collection_of(&project, &request).map(|c| c.vars.clone()).unwrap_or_default());
+        let mut scope = runner::effective_env(scope_env.as_ref(), &collection_vars);
+        if !reveal {
+            if let Some(scope) = scope.as_mut() {
+                secrets::mask_key_values(&mut scope.vars);
+            }
+        }
+        let resolved = crate::core::vars::resolve(&request, scope.as_ref()).map_err(|e| e.to_string())?;
+        let code = crate::core::codegen::generate(lang, &request, &resolved, scope.as_ref());
+        Ok(json!({"language": lang.id(), "label": lang.label(), "code": code}).into())
+    }
+
+    /// Ready Docker, or a readable refusal.
+    fn docker(&self) -> Result<std::path::PathBuf, String> {
+        match mock::docker_status() {
+            mock::DockerStatus::Ready { docker, .. } => Ok(docker),
+            mock::DockerStatus::NotRunning { message, .. } => {
+                Err(format!("Docker is installed but not running ({message}): ask the user to start Docker Desktop"))
+            }
+            mock::DockerStatus::Missing => Err("Docker is not installed: mock servers run in Docker (https://docs.docker.com/get-docker/)".into()),
+        }
+    }
+
+    fn mock_json(project: &Project, id: &str, run: &mock::MockRun) -> Value {
+        let name = project.collections.iter().find(|c| c.id == id).map(|c| c.name.clone());
+        let mut v = json!({
+            "collection_id": id,
+            "collection": name,
+            "url": run.url,
+            "port": run.port,
+            "engine": run.engine.label(),
+            "container": run.container,
+        });
+        if run.coverage != mock::MockCoverage::default() {
+            v["coverage"] = json!({
+                "from_examples": run.coverage.from_examples,
+                "from_spec": run.coverage.from_spec,
+                "without_answer": run.coverage.missing,
+            });
+        }
+        v
+    }
+
+    fn mock_status(&self, args: &Args) -> ToolResult {
+        let project = self.load()?;
+        let docker = match mock::docker_status() {
+            mock::DockerStatus::Ready { docker, version } => (docker, version),
+            other => {
+                return Ok(json!({"docker": match other {
+                    mock::DockerStatus::Missing => "missing",
+                    _ => "not running",
+                }, "mocks": []})
+                .into())
+            }
+        };
+        let only = match args.str("collection")? {
+            Some(c) => Some(project.collections[find_collection(&project, c)?].id.clone()),
+            None => None,
+        };
+        let mocks: Vec<Value> = mock::running_mocks(&docker.0)?
+            .iter()
+            .filter(|(id, _)| only.as_ref().is_none_or(|o| o == id))
+            .map(|(id, run)| Self::mock_json(&project, id, run))
+            .collect();
+        Ok(json!({"docker": format!("ready ({})", docker.1), "mocks": mocks}).into())
+    }
+
+    fn running_mock_of(&self, docker: &Path, collection_id: &str) -> Result<Option<mock::MockRun>, String> {
+        Ok(mock::running_mocks(docker)?.into_iter().find(|(id, _)| id == collection_id).map(|(_, r)| r))
+    }
+
+    fn start_mock(&self, args: &Args) -> ToolResult {
+        let project = self.load()?;
+        let c = &project.collections[find_collection(&project, args.req_str("collection")?)?];
+        let docker = self.docker()?;
+        if let Some(run) = self.running_mock_of(&docker, &c.id)? {
+            let mut v = Self::mock_json(&project, &c.id, &run);
+            v["already_running"] = json!(true);
+            return Ok(v.into());
+        }
+        let settings = project.settings.mock.clone();
+        let taken: Vec<u16> = mock::running_mocks(&docker)?.iter().map(|(_, r)| r.port).collect();
+        let port = mock::free_port(settings.port, &taken).ok_or("No free port for the mock")?;
+        let spec = project_ops::spec_for_collection(&project, c);
+        let dir = mock::mock_dir(Some(&self.path), &c.id);
+        let run = mock::start(&docker, &settings, c, spec.as_ref(), &dir, port)?;
+        let mut v = Self::mock_json(&project, &c.id, &run);
+        v["hint"] = json!("Point requests at it with an environment whose baseUrl is this URL; x-mock-response-name / x-mock-response-code headers pick an example.");
+        Ok(v.into())
+    }
+
+    fn stop_mock(&self, args: &Args) -> ToolResult {
+        let project = self.load()?;
+        let c = &project.collections[find_collection(&project, args.req_str("collection")?)?];
+        let docker = self.docker()?;
+        let Some(run) = self.running_mock_of(&docker, &c.id)? else {
+            return Ok(json!({"collection": c.name, "stopped": false, "note": "no mock was running"}).into());
+        };
+        mock::stop(&docker, &run)?;
+        Ok(json!({"collection": c.name, "stopped": true}).into())
+    }
+
+    fn reload_mock(&self, args: &Args) -> ToolResult {
+        let project = self.load()?;
+        let c = &project.collections[find_collection(&project, args.req_str("collection")?)?];
+        let docker = self.docker()?;
+        let run = self.running_mock_of(&docker, &c.id)?.ok_or("No mock is running for this collection: start_mock first")?;
+        let spec = project_ops::spec_for_collection(&project, c);
+        let run = mock::reload(&run, c, spec.as_ref())?;
+        Ok(Self::mock_json(&project, &c.id, &run).into())
     }
 
     fn run_collection(&self, args: &Args) -> ToolResult {

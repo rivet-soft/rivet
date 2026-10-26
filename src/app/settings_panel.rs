@@ -709,6 +709,33 @@ impl SettingsPanel {
                     cx,
                 ),
             )
+            .child(self.mcp_toggle(
+                "settings-mcp-mocks",
+                "Управлять моками",
+                "Статус, запуск, остановка и перезагрузка мок-серверов в Docker",
+                mcp.allow_mocks,
+                off,
+                |m| m.allow_mocks = !m.allow_mocks,
+                cx,
+            ))
+            .child(self.mcp_toggle(
+                "settings-mcp-files",
+                "Записывать файлы",
+                "Экспорт коллекции в файл на диске (export_collection с path)",
+                mcp.allow_files,
+                off,
+                |m| m.allow_files = !m.allow_files,
+                cx,
+            ))
+            .child(self.mcp_toggle(
+                "settings-mcp-history",
+                "Читать историю запросов",
+                "get_history: отправленные запросы с адресами и статусами",
+                mcp.allow_history,
+                off,
+                |m| m.allow_history = !m.allow_history,
+                cx,
+            ))
             .when(mcp.reveal_secrets, |d| {
                 d.child(
                     div()
