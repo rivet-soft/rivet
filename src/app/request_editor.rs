@@ -211,6 +211,9 @@ fn details_height(available: f32, ratio: f32) -> f32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum KvTarget {
     Params,
+    /// `:name` path segments of the URL; keys follow the URL, rows are never
+    /// added or removed by hand.
+    PathVars,
     Headers,
     Form,
 }
@@ -221,6 +224,7 @@ impl KvTarget {
             Self::Params => "req-params",
             Self::Headers => "req-headers",
             Self::Form => "req-form",
+            Self::PathVars => "req-path-vars",
         }
     }
 
@@ -229,6 +233,7 @@ impl KvTarget {
             Self::Params => &spec.params,
             Self::Headers => &spec.headers,
             Self::Form => &spec.body.form,
+            Self::PathVars => &spec.path_vars,
         }
     }
 
@@ -237,6 +242,7 @@ impl KvTarget {
             Self::Params => &mut spec.params,
             Self::Headers => &mut spec.headers,
             Self::Form => &mut spec.body.form,
+            Self::PathVars => &mut spec.path_vars,
         }
     }
 }
@@ -595,6 +601,7 @@ pub struct RequestEditor {
     params: Vec<RowInputs>,
     headers: Vec<RowInputs>,
     form: Vec<RowInputs>,
+    path_vars: Vec<RowInputs>,
     next_row_id: u64,
     /// Tables currently shown as bulk text instead of rows.
     bulk: Vec<BulkEdit>,
@@ -755,6 +762,7 @@ impl RequestEditor {
             params: Vec::new(),
             headers: Vec::new(),
             form: Vec::new(),
+            path_vars: Vec::new(),
             next_row_id: 0,
             bulk: Vec::new(),
             expanded: None,
@@ -795,6 +803,7 @@ impl RequestEditor {
     /// Loads another request, rebuilding every editor. Emits nothing.
     pub fn set_spec(&mut self, spec: RequestSpec, window: &mut Window, cx: &mut Context<Self>) {
         self.spec = spec;
+        self.spec.path_vars = vars::sync_path_vars(&self.spec.url, &self.spec.path_vars);
         self.expanded = None;
         self.body_error = None;
         self.auth_menu_open = false;
@@ -809,6 +818,7 @@ impl RequestEditor {
                 .collect();
             *self.rows_mut(target) = rows;
         }
+        self.rebuild_path_var_rows(window, cx);
         for ix in 0..self.bulk.len() {
             let list = self.bulk[ix].target.list(&self.spec).clone();
             let text = bulk::to_text(&list);
@@ -1094,6 +1104,7 @@ impl RequestEditor {
         match target {
             KvTarget::Params => schema_hover::param_info(spec, r, key, "query")
                 .or_else(|| schema_hover::param_info(spec, r, key, "path")),
+            KvTarget::PathVars => schema_hover::param_info(spec, r, key, "path"),
             KvTarget::Headers => schema_hover::param_info(spec, r, key, "header"),
             KvTarget::Form => None,
         }
@@ -1328,6 +1339,28 @@ impl RequestEditor {
         cx.notify();
     }
 
+    /// Path Variables rows for the current list (no draft row: keys come from the URL).
+    fn rebuild_path_var_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let list = self.spec.path_vars.clone();
+        self.path_vars = list
+            .iter()
+            .map(|kv| self.make_row(KvTarget::PathVars, Some(kv), window, cx))
+            .collect();
+    }
+
+    /// The URL changed in the request line: add/remove Path Variables rows to
+    /// match its `:name` segments, keeping the values already typed.
+    pub fn set_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.spec.url = url.to_string();
+        let synced = vars::sync_path_vars(url, &self.spec.path_vars);
+        if synced != self.spec.path_vars {
+            self.spec.path_vars = synced;
+            self.rebuild_path_var_rows(window, cx);
+            cx.emit(RequestEditorEvent::Changed);
+            cx.notify();
+        }
+    }
+
     /// Whether `tab` (Params / Headers / Body form) shows its rows as `key:value` text.
     pub fn is_bulk_edit(&self, tab: RequestEditorTab) -> bool {
         KvTarget::of_tab(tab).is_some_and(|t| self.bulk.iter().any(|b| b.target == t))
@@ -1416,6 +1449,7 @@ impl RequestEditor {
             KvTarget::Params => &self.params,
             KvTarget::Headers => &self.headers,
             KvTarget::Form => &self.form,
+            KvTarget::PathVars => &self.path_vars,
         }
     }
 
@@ -1424,6 +1458,7 @@ impl RequestEditor {
             KvTarget::Params => &mut self.params,
             KvTarget::Headers => &mut self.headers,
             KvTarget::Form => &mut self.form,
+            KvTarget::PathVars => &mut self.path_vars,
         }
     }
 
@@ -1440,6 +1475,7 @@ impl RequestEditor {
             KvTarget::Headers => "Header",
             KvTarget::Params => "Param",
             KvTarget::Form => "Field",
+            KvTarget::PathVars => "Variable",
         };
         let key = cx.new(|cx| {
             let mut s = InputState::new(window, cx).placeholder(placeholder);
@@ -1840,13 +1876,14 @@ impl RequestEditor {
     }
 
     /// "Bulk Edit" / "Key-Value Edit" cell at the right of a table header (as in Postman).
-    fn bulk_toggle(&self, target: KvTarget, cx: &mut Context<Self>) -> impl IntoElement {
+    fn bulk_toggle(&self, target: KvTarget, cx: &mut Context<Self>) -> AnyElement {
         let p = *cx.palette();
         let bulk = self.bulk.iter().any(|b| b.target == target);
         let tab = match target {
             KvTarget::Params => RequestEditorTab::Params,
             KvTarget::Headers => RequestEditorTab::Headers,
             KvTarget::Form => RequestEditorTab::Body,
+            KvTarget::PathVars => return div().into_any_element(),
         };
         div()
             .id("bulk-toggle")
@@ -1868,6 +1905,7 @@ impl RequestEditor {
             .on_click(cx.listener(move |this, _, window, cx| this.toggle_bulk_edit(tab, window, cx)))
             .child(if bulk { "Key-Value Edit" } else { "Bulk Edit" })
             .test_support()
+            .into_any_element()
     }
 
     fn render_kv(&self, target: KvTarget, cx: &mut Context<Self>) -> AnyElement {
@@ -1920,6 +1958,7 @@ impl RequestEditor {
         }
         let list = target.list(&self.spec);
         let is_multipart = target == KvTarget::Form && self.spec.body.kind == BodyKind::Multipart;
+        let path_vars = target == KvTarget::PathVars;
         let header = div()
             .relative()
             .flex()
@@ -1932,7 +1971,7 @@ impl RequestEditor {
             .text_size(px(10.5))
             .text_color(p.text_dim)
             .child(div().w(px(16.)).flex_none())
-            .child(div().flex_1().child("KEY"))
+            .child(div().flex_1().child(if path_vars { "PATH VARIABLE" } else { "KEY" }))
             .when(is_multipart, |d| {
                 d.child(div().w(px(84.)).flex_none().child("TYPE"))
             })
@@ -1991,8 +2030,8 @@ impl RequestEditor {
                 .size(px(16.))
                 .rounded(px(4.))
                 .border_1()
-                .when(draft, |d| d.invisible())
-                .when(!draft, |d| {
+                .when(draft || path_vars, |d| d.invisible())
+                .when(!draft && !path_vars, |d| {
                     d.cursor_pointer().on_click(
                         cx.listener(move |this, _, _, cx| this.toggle_row(target, ix, cx)),
                     )
@@ -2009,7 +2048,7 @@ impl RequestEditor {
                     }
                 })
                 .test_support();
-            let delete = div().w(px(22.)).flex_none().when(!draft, |d| {
+            let delete = div().w(px(22.)).flex_none().when(!draft && !path_vars, |d| {
                 d.child(
                     IconButton::new(("delete", ix), IconName::X)
                         .size(12.)
@@ -2038,7 +2077,23 @@ impl RequestEditor {
                                 this.set_param_hover(target, ix, *hovered, cx)
                             }))
                         })
-                        .child(cell(&row.key, "key", true))
+                        .map(|d| {
+                            if path_vars {
+                                // The name comes from the URL (`:name`); edit it there.
+                                d.child(
+                                    div()
+                                        .h(px(30.))
+                                        .flex()
+                                        .items_center()
+                                        .px(px(2.))
+                                        .font_family(MONO)
+                                        .text_size(px(12.))
+                                        .child(kv.map(|kv| kv.key.clone()).unwrap_or_default()),
+                                )
+                            } else {
+                                d.child(cell(&row.key, "key", true))
+                            }
+                        })
                         .when_some(name_issue.as_ref(), |d, issue| {
                             d.child(
                                 div()
@@ -2189,11 +2244,45 @@ impl RequestEditor {
             .id(target.scope())
             .flex()
             .flex_col()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
+            // Next to Path Variables the query table takes its natural height and
+            // the Params tab scrolls as a whole.
+            .map(|d| {
+                let natural = path_vars
+                    || (target == KvTarget::Params && !self.spec.path_vars.is_empty());
+                if natural { d.flex_none() } else { d.flex_1().min_h_0().overflow_y_scroll() }
+            })
             .child(header)
             .children(rows)
+            .into_any_element()
+    }
+
+    /// Params tab: the query table, plus Path Variables when the URL has `:name` segments.
+    fn render_params(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.spec.path_vars.is_empty() {
+            return self.render_kv(KvTarget::Params, cx);
+        }
+        let p = *cx.palette();
+        let bulk = self.is_bulk_edit(RequestEditorTab::Params);
+        div()
+            .id("params-with-path")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            // Bulk text fills the space itself; rows scroll together with Path Variables.
+            .when(!bulk, |d| d.overflow_y_scroll())
+            .child(self.render_kv(KvTarget::Params, cx))
+            .child(
+                div()
+                    .px(px(14.))
+                    .pt(px(10.))
+                    .pb(px(4.))
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.text_dim)
+                    .child("Path Variables"),
+            )
+            .child(self.render_kv(KvTarget::PathVars, cx))
             .into_any_element()
     }
 
@@ -2766,7 +2855,7 @@ impl Render for RequestEditor {
         self.sync_expanded_value(window, cx);
         let p = *cx.palette();
         let content = match self.tab {
-            RequestEditorTab::Params => self.render_kv(KvTarget::Params, cx).into_any_element(),
+            RequestEditorTab::Params => self.render_params(cx),
             RequestEditorTab::Headers => self.render_kv(KvTarget::Headers, cx).into_any_element(),
             RequestEditorTab::Body => self.render_kv(KvTarget::Params, cx).into_any_element(),
             RequestEditorTab::Auth => self.render_auth(cx).into_any_element(),

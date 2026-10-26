@@ -804,3 +804,52 @@ fn bulk_edit_in_body_form_table(cx: &mut TestAppContext) {
         assert_eq!((form[1].key.as_str(), form[1].value.as_str(), form[1].enabled), ("b", "2", false));
     });
 }
+
+#[gpui_kit::test]
+fn path_variables_follow_the_url(cx: &mut TestAppContext) {
+    let mut spec = sample();
+    spec.url = "{{baseUrl}}/users/:id/posts/:post".into();
+    spec.path_vars = vec![KeyValue::new("id", "7").description("user id")];
+    let (view, window, events) = open(cx, spec);
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        let table = w.within("req-path-vars");
+        assert!(table.try_find(("value", 0usize)).is_some());
+        assert!(table.try_find(("value", 1usize)).is_some());
+        assert!(table.try_find(("value", 2usize)).is_none(), "no draft row");
+        assert!(table.try_find(("key", 0usize)).is_none(), "names are not editable");
+        assert!(table.try_find(("delete", 0usize)).is_none());
+    });
+    view.read_with(window, |v, _| {
+        assert_eq!(
+            v.spec().path_vars,
+            vec![KeyValue::new("id", "7").description("user id"), KeyValue::new("post", "")]
+        );
+    });
+    assert!(events.borrow().is_empty(), "loading a request is not an edit");
+
+    // Typing a value.
+    window.update(|w, cx| {
+        w.within("req-path-vars").click(("value", 1usize), cx);
+        w.input("99", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| assert_eq!(v.spec().path_vars[1].value, "99"));
+
+    // The URL loses `:post` and gains `:tag`: values of kept names survive.
+    view.update_in(window, |v, window, cx| v.set_url("{{baseUrl}}/users/:id/tags/:tag", window, cx));
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| {
+        assert_eq!(
+            v.spec().path_vars,
+            vec![KeyValue::new("id", "7").description("user id"), KeyValue::new("tag", "")]
+        );
+    });
+    assert!(events.borrow().contains(&RequestEditorEvent::Changed));
+    // No `:name` left: the section disappears.
+    view.update_in(window, |v, window, cx| v.set_url("{{baseUrl}}/users", window, cx));
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("params-with-path").is_none());
+    });
+}

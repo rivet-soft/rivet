@@ -1501,3 +1501,31 @@ fn code_panel_renders_snippets_and_remembers_language(cx: &mut TestAppContext) {
         assert!(w.try_find("code-panel").is_none());
     });
 }
+
+#[gpui_kit::test]
+fn path_variables_are_substituted_when_sending(cx: &mut TestAppContext) {
+    let (base, seen) = serve_recording();
+    let mut p = project();
+    p.open_tabs = vec![rivet::core::RequestSpec::new("Q", Method::Get, format!("{base}/users"))];
+    p.active_tab = Some(0);
+    let (view, window) = open_with(cx, p);
+    window.update(|w, cx| {
+        w.click("url", cx);
+        w.press("cmd-right", cx);
+        w.input("/:id", cx);
+    });
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.within("req-path-vars").click(("value", 0usize), cx);
+        w.input("a b", cx);
+    });
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.press("cmd-enter", cx);
+    });
+    wait_sent(&view, window, 0);
+    assert_eq!(seen.lock().unwrap().last().unwrap(), "GET /users/a%20b HTTP/1.1");
+    view.read_with(window, |v, _| {
+        assert_eq!(v.tabs[0].request.path_vars, vec![KeyValue::new("id", "a b")]);
+    });
+}

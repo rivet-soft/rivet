@@ -38,6 +38,7 @@ cargo test                   # все тесты
 
 ### Запросы
 - GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS; Params, Headers, Body (none, form‑data с файлами, x‑www‑form‑urlencoded, raw JSON с подсветкой, Text, binary), Auth (Bearer / Basic / API Key / Inherit from spec).
+- Path Variables: сегменты `:id` в URL получают свою таблицу во вкладке Params (как в Postman), значения подставляются при отправке.
 - Переменные `{{var}}` из коллекции и активного окружения (коллекция в приоритете) — в URL, params, headers, body и auth, с подсветкой и предупреждением о неопределённых. Встроенные: `{{$uuid}}`, `{{$timestamp}}`, `{{$randomInt}}`.
 - cURL: вставьте `curl …` в поле URL — получится запрос; «Copy cURL» копирует активный.
 - **Код**: запрос как готовый сниппет — cURL, HTTPie, wget, Python requests, JavaScript fetch, Node.js axios, Go, Rust reqwest, PHP, C#, Java OkHttp, Swift; файлы multipart и бинарного тела остаются ссылками на файлы.

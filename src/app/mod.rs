@@ -1233,8 +1233,9 @@ impl Workspace {
                         {
                             tab.request.name = request_name_from_url(&value);
                         }
-                        tab.request.url = value;
+                        tab.request.url = value.clone();
                         self.schedule_save(cx);
+                        self.editor.update(cx, |e, cx| e.set_url(&value, window, cx));
                     }
                 }
             }
@@ -1267,6 +1268,7 @@ impl Workspace {
                 let spec = editor.read(cx).spec().clone();
                 if let Some(tab) = self.active_mut() {
                     tab.request.params = spec.params;
+                    tab.request.path_vars = spec.path_vars;
                     tab.request.headers = spec.headers;
                     tab.request.body = spec.body;
                     tab.request.auth = spec.auth;
