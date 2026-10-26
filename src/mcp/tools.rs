@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use super::args::{self, Args};
 use super::output;
 use crate::core::collection_run::{self, CollectionRunOptions};
+use crate::core::export::{self, ExportFormat};
 use crate::core::http::{CancelToken, HttpSessions};
 use crate::core::project_ops::{self, find_collection, find_env, find_request, is_destructive};
 use crate::core::mcp_activity::{self, ActivityEntry};
@@ -274,6 +275,19 @@ pub fn definitions() -> Vec<Value> {
             false,
         ),
         tool(
+            "export_collection",
+            "Export collection",
+            "Export a collection as Rivet (lossless, re-importable), Postman Collection v2.1 or OpenAPI 3.0 YAML. With `path` the file is written there, otherwise the content is returned. Secrets are masked unless reveal_secrets (and Settings → MCP allows it). Warnings list what the format can't carry.",
+            json!({
+                "collection": {"type": "string", "description": "Collection id or name"},
+                "format": {"type": "string", "enum": ["rivet", "postman", "openapi"], "description": "Default rivet"},
+                "path": {"type": "string", "description": "Absolute file path to write; omit to get the content back"},
+                "reveal_secrets": reveal_prop()
+            }),
+            &["collection"],
+            false,
+        ),
+        tool(
             "run_collection",
             "Run collection",
             "Run a collection's requests (or one folder) in order, carrying variables set by scripts to the next request. Returns per-request status, tests and errors plus totals; variable changes and history are saved.",
@@ -308,6 +322,7 @@ pub fn tool_names() -> &'static [&'static str] {
         "set_variable",
         "unset_variable",
         "import_spec",
+        "export_collection",
         "run_collection",
     ]
 }
@@ -404,6 +419,7 @@ impl Server {
             "set_variable" => self.set_variable(&args, true),
             "unset_variable" => self.set_variable(&args, false),
             "import_spec" => self.import_spec(&args),
+            "export_collection" => self.export_collection(&args),
             "run_collection" => self.run_collection(&args),
             other => Err(format!("Unknown tool: {other}")),
         }
@@ -924,6 +940,44 @@ impl Server {
         project.collections.push(c);
         self.save(&base, &project)?;
         Ok(summary.into())
+    }
+
+    fn export_collection(&self, args: &Args) -> ToolResult {
+        let project = self.load()?;
+        let mut collection = project.collections[find_collection(&project, args.req_str("collection")?)?].clone();
+        let format = match args.str("format")? {
+            Some(id) => ExportFormat::from_id(id)
+                .ok_or_else(|| format!("Unknown format '{id}': use rivet, postman or openapi"))?,
+            None => ExportFormat::Rivet,
+        };
+        let path = args.str("path")?.map(PathBuf::from);
+        // Same rule for inline content and files (a file the model writes it
+        // can also read): secrets stay masked unless Settings → MCP allows it.
+        if !self.reveal(args)? {
+            secrets::mask_key_values(&mut collection.vars);
+            for request in &mut collection.requests {
+                secrets::mask_request(request);
+            }
+        }
+        let exported = export::export(&collection, format)?;
+        let mut value = json!({
+            "collection": collection.name,
+            "format": format.id(),
+            "request_count": collection.requests.len(),
+            "warnings": exported.warnings,
+        });
+        match path {
+            Some(path) => {
+                if path.is_relative() {
+                    return Err("path must be absolute".into());
+                }
+                std::fs::write(&path, &exported.text).map_err(|e| format!("{}: {e}", path.display()))?;
+                value["path"] = json!(path.display().to_string());
+                value["bytes"] = json!(exported.text.len());
+            }
+            None => value["content"] = json!(exported.text),
+        }
+        Ok(value.into())
     }
 
     fn run_collection(&self, args: &Args) -> ToolResult {

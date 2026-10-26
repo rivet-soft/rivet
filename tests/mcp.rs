@@ -194,6 +194,7 @@ fn protocol_basics_and_tool_list() {
         "set_variable",
         "unset_variable",
         "import_spec",
+        "export_collection",
         "run_collection",
     ] {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
@@ -566,4 +567,43 @@ fn activity_log_records_calls() {
     assert_eq!(send.client.as_deref(), Some("test"));
     assert_eq!(entries[3].summary, "коллекций: 2");
     assert!(entries[3].at > 0);
+}
+
+#[test]
+fn export_collection_writes_files_and_masks_inline_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = seed(dir.path(), "http://127.0.0.1:9");
+    let mut project = store::load(&path).unwrap();
+    project.collections[0].requests[0].auth = rivet::core::Auth::Bearer { token: "super-secret-token".into() };
+    store::save(&path, &project).unwrap();
+    let mut mcp = Mcp::start(&path);
+
+    // Inline: secrets masked.
+    let inline = mcp.ok("export_collection", json!({"collection": "Shop", "format": "postman"}));
+    let content = inline["content"].as_str().unwrap();
+    assert!(!content.contains("super-secret-token"));
+    assert!(content.contains(MASK));
+    assert!(content.contains("v2.1.0"));
+    // reveal_secrets needs Settings → MCP permission — for files too.
+    let file = dir.path().join("shop.rivet.json");
+    mcp.ok("export_collection", json!({"collection": "Shop", "path": file, "reveal_secrets": true}));
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("super-secret-token"));
+    set_mcp(&path, |m| m.reveal_secrets = true);
+    let revealed = mcp.ok("export_collection", json!({"collection": "Shop", "format": "postman", "reveal_secrets": true}));
+    assert!(revealed["content"].as_str().unwrap().contains("super-secret-token"));
+
+    // To a file: re-importable (Rivet format).
+    let written = mcp.ok("export_collection", json!({"collection": "Shop", "path": file, "reveal_secrets": true}));
+    assert_eq!(written["format"], "rivet");
+    assert_eq!(written["request_count"], 2);
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("super-secret-token"));
+
+    let yaml = mcp.ok("export_collection", json!({"collection": "Shop", "format": "openapi"}));
+    assert!(yaml["content"].as_str().unwrap().contains("openapi: 3.0.3"));
+    assert!(mcp.err("export_collection", json!({"collection": "Shop", "format": "har"})).contains("Unknown format"));
+    assert!(mcp.err("export_collection", json!({"collection": "Shop", "path": "rel.json"})).contains("absolute"));
+    let imported = mcp.ok("import_spec", json!({"path": file}));
+    assert_eq!(imported["format"], "rivet");
+    assert_eq!(imported["request_count"], 2);
 }

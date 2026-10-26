@@ -114,7 +114,8 @@ Claude Desktop (`claude_desktop_config.json`), Cursor (`.cursor/mcp.json`) — �
 | `get_history` | последние отправки (`limit`, `query`) |
 | `list_environments`, `set_active_environment`, `create_environment` | окружения: список, выбор активного, создание (цвет, production, переменные) |
 | `get_variables`, `set_variable`, `unset_variable` | переменные окружения или коллекции (`scope`: `environment` / `collection`) |
-| `import_spec` | импорт OpenAPI / Swagger / Postman в новую коллекцию |
+| `import_spec` | импорт OpenAPI / Swagger / Postman / Rivet в новую коллекцию |
+| `export_collection` | экспорт коллекции в Rivet (без потерь), Postman v2.1 или OpenAPI 3 — в файл или в ответ (секреты замаскированы) |
 | `run_collection` | прогон коллекции или папки по порядку с передачей переменных между запросами; `stop_on_failure`, `environment`, `delay_ms`; отчёт с тестами и итогами |
 
 Как в приложении, `send_request` и `run_collection` выполняют скрипты, сохраняют переменные, выставленные `pm.environment.set` / `pm.collectionVariables.set`, и пишут историю.
