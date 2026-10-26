@@ -853,3 +853,36 @@ fn path_variables_follow_the_url(cx: &mut TestAppContext) {
         assert!(w.try_find("params-with-path").is_none());
     });
 }
+
+#[gpui_kit::test]
+fn docs_tab_edits_the_description(cx: &mut TestAppContext) {
+    let mut spec = sample();
+    spec.description = "Creates an order.".into();
+    let (view, window, events) = open(cx, spec);
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("docs-dot").is_some(), "a described request is marked");
+        w.click(("subtab", RequestEditorTab::Docs as usize), cx);
+        w.render_frame(cx);
+        assert!(w.try_find("request-docs").is_some());
+        w.click("request-docs", cx);
+        w.press("cmd-a", cx);
+        w.input("Lists *all* orders.", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| {
+        assert_eq!(v.active_tab(), RequestEditorTab::Docs);
+        assert_eq!(v.spec().description, "Lists *all* orders.");
+    });
+    assert!(events.borrow().contains(&RequestEditorEvent::Changed));
+    // set_spec loads another request's docs without an edit event.
+    events.borrow_mut().clear();
+    let mut other = sample();
+    other.description = String::new();
+    view.update_in(window, |v, window, cx| v.set_spec(other, window, cx));
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("docs-dot").is_none());
+    });
+    view.read_with(window, |v, _| assert!(v.spec().description.is_empty()));
+}

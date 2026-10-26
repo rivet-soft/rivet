@@ -1380,6 +1380,7 @@ impl Workspace {
                     tab.request.follow_redirects = spec.follow_redirects;
                     tab.request.max_redirects = spec.max_redirects;
                     tab.request.scripts = spec.scripts;
+                    tab.request.description = spec.description;
                 }
                 self.schedule_save(cx);
                 cx.notify();

@@ -52,15 +52,18 @@ pub enum RequestEditorTab {
     /// Declared last so the existing `("subtab", n)` ids keep their numbers;
     /// shown right after Auth.
     Scripts,
+    /// The request's description (documentation), shown after Scripts.
+    Docs,
 }
 
 impl RequestEditorTab {
-    pub const ALL: [RequestEditorTab; 6] = [
+    pub const ALL: [RequestEditorTab; 7] = [
         Self::Params,
         Self::Headers,
         Self::Body,
         Self::Auth,
         Self::Scripts,
+        Self::Docs,
         Self::Settings,
     ];
 
@@ -72,6 +75,7 @@ impl RequestEditorTab {
             Self::Auth => "Auth",
             Self::Settings => "Settings",
             Self::Scripts => "Scripts",
+            Self::Docs => "Docs",
         }
     }
 }
@@ -644,6 +648,8 @@ pub struct RequestEditor {
     script_stage: ScriptStage,
     /// One JS editor per stage, so each keeps its own cursor and undo history.
     pre_script: Entity<EditorState>,
+    /// Docs tab: the request description.
+    docs_editor: Entity<EditorState>,
     post_script: Entity<EditorState>,
     _subscriptions: Vec<Subscription>,
 }
@@ -673,6 +679,12 @@ impl RequestEditor {
         let redirect_limit = cx.new(|cx| InputState::new(window, cx).placeholder("По умолчанию"));
         let pre_script = cx.new(|cx| EditorState::new(window, cx).language("javascript"));
         let post_script = cx.new(|cx| EditorState::new(window, cx).language("javascript"));
+        let docs_editor = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .line_number(false)
+                .soft_wrap(true)
+                .placeholder("Что делает запрос, параметры, примеры, ссылки (Markdown)")
+        });
 
         let mut subscriptions = vec![cx.subscribe_in(
             &body_editor,
@@ -753,6 +765,20 @@ impl RequestEditor {
             ));
         }
 
+        subscriptions.push(cx.subscribe_in(
+            &docs_editor,
+            window,
+            |this, state, ev: &InputEvent, _, cx| {
+                if let InputEvent::Change = ev {
+                    let text = state.read(cx).value().to_string();
+                    if this.spec.description != text {
+                        this.spec.description = text;
+                        cx.emit(RequestEditorEvent::Changed);
+                    }
+                    cx.notify();
+                }
+            },
+        ));
         let mut this = Self {
             spec: spec.clone(),
             tab: RequestEditorTab::default(),
@@ -790,6 +816,7 @@ impl RequestEditor {
             script_stage: ScriptStage::default(),
             pre_script,
             post_script,
+            docs_editor,
             _subscriptions: subscriptions,
         };
         this.set_spec(spec, window, cx);
@@ -837,6 +864,8 @@ impl RequestEditor {
         self.param_hover = None;
         self.refresh_body_diagnostics(cx);
 
+        let docs = self.spec.description.clone();
+        self.docs_editor.update(cx, |s, cx| s.set_value(docs, window, cx));
         for stage in ScriptStage::ALL {
             let text = stage.script(&self.spec).to_string();
             self.script_editor(stage)
@@ -1800,13 +1829,15 @@ impl RequestEditor {
             RequestEditorTab::Headers,
             RequestEditorTab::Auth,
             RequestEditorTab::Scripts,
+            RequestEditorTab::Docs,
             RequestEditorTab::Settings,
         ]
         .into_iter()
         .map(|tab| {
             let active = tab == self.tab;
             let count = self.count(tab);
-            let dot = tab == RequestEditorTab::Scripts && self.has_scripts();
+            let dot = (tab == RequestEditorTab::Scripts && self.has_scripts())
+                || (tab == RequestEditorTab::Docs && !self.spec.description.trim().is_empty());
             div()
                 .id(("subtab", tab as usize))
                 .flex()
@@ -1838,7 +1869,7 @@ impl RequestEditor {
                 .when(dot, |d| {
                     d.child(
                         div()
-                            .id("scripts-dot")
+                            .id(if tab == RequestEditorTab::Docs { "docs-dot" } else { "scripts-dot" })
                             .size(px(6.))
                             .rounded_full()
                             .bg(if active { p.accent_hi } else { p.accent })
@@ -2860,6 +2891,21 @@ impl Render for RequestEditor {
             RequestEditorTab::Body => self.render_kv(KvTarget::Params, cx).into_any_element(),
             RequestEditorTab::Auth => self.render_auth(cx).into_any_element(),
             RequestEditorTab::Scripts => self.render_scripts(cx).into_any_element(),
+            RequestEditorTab::Docs => div()
+                .id("request-docs")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    Editor::new(&self.docs_editor)
+                        .appearance(false)
+                        .bordered(false)
+                        .text_size(px(12.5))
+                        .h(relative(1.)),
+                )
+                .test_support()
+                .into_any_element(),
             RequestEditorTab::Settings => {
                 let view = cx.entity();
                 RequestRedirectSettings::new(

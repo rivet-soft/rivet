@@ -1646,3 +1646,18 @@ fn responses_saved_as_examples(cx: &mut TestAppContext) {
         assert!(v.tabs[0].request.examples.is_empty());
     });
 }
+
+#[gpui_kit::test]
+fn collection_description_is_editable(cx: &mut TestAppContext) {
+    let (view, window) = open(cx);
+    view.update_in(window, |v, window, cx| v.set_rail(RailMode::Collections, window, cx));
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.click("collection-description", cx);
+        w.input("Внутренний API магазина", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| {
+        assert_eq!(v.project.collections[0].description, "Внутренний API магазина");
+    });
+}

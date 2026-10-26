@@ -31,10 +31,12 @@ pub struct CollectionPanel {
     collections: Vec<Collection>,
     selected: usize,
     name: Entity<InputState>,
+    description: Entity<gpui_kit::component::input::TextareaState>,
     rows: Vec<VarRow>,
     /// The delete confirmation for the selected collection is open.
     pub confirm_delete: bool,
     _name_subscription: Subscription,
+    _description_subscription: Subscription,
 }
 
 impl CollectionPanel {
@@ -49,13 +51,32 @@ impl CollectionPanel {
                     }
                 }
             });
+        let description = cx.new(|cx| {
+            gpui_kit::component::input::TextareaState::new(window, cx)
+                .auto_grow(3, 14)
+                .placeholder("Описание коллекции: назначение, авторизация, ссылки (Markdown)")
+        });
+        let description_subscription =
+            cx.subscribe_in(&description, window, |this, state, ev: &InputEvent, _, cx| {
+                if let InputEvent::Change = ev {
+                    let text = state.read(cx).value().to_string();
+                    if let Some(col) = this.collections.get_mut(this.selected) {
+                        if col.description != text {
+                            col.description = text;
+                            this.changed(cx);
+                        }
+                    }
+                }
+            });
         let mut this = Self {
             collections,
             selected: 0,
             name,
+            description,
             rows: Vec::new(),
             confirm_delete: false,
             _name_subscription: name_subscription,
+            _description_subscription: description_subscription,
         };
         this.rebuild(window, cx);
         this
@@ -82,12 +103,13 @@ impl CollectionPanel {
     }
 
     fn rebuild(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (name, vars) = self
+        let (name, vars, description) = self
             .collections
             .get(self.selected)
-            .map(|c| (c.name.clone(), c.vars.clone()))
+            .map(|c| (c.name.clone(), c.vars.clone(), c.description.clone()))
             .unwrap_or_default();
         self.name.update(cx, |s, cx| s.set_value(name, window, cx));
+        self.description.update(cx, |s, cx| s.set_value(description, window, cx));
         self.rows = vars
             .iter()
             .enumerate()
@@ -328,6 +350,10 @@ impl Render for CollectionPanel {
                             })
                             .child(delete)))
                     .child(div().w(px(420.)).child(Input::new(&self.name).id("collection-name").h(px(30.))))
+                    .child(div().id("collection-description").max_w(px(640.)).child(
+                        gpui_kit::component::input::Textarea::new(&self.description)
+                            .text_size(px(12.5)),
+                    ).test_support())
                     .child(div().text_color(p.text_dim).child(col.source.as_ref().map(|s| format!("Связанный файл: {}", s.display())).unwrap_or_else(|| "Ручная коллекция".into())))
                     .child(div().pt(px(12.)).border_t_1().border_color(p.border)
                         .text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Cookies"))
