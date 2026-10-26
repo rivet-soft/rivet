@@ -19,6 +19,7 @@ pub struct TreeRow {
     kind: Kind,
     selected: bool,
     trailing_padding: f32,
+    modified: bool,
     on_click: Option<ClickHandler>,
 }
 
@@ -48,6 +49,7 @@ impl TreeRow {
             kind,
             selected: false,
             trailing_padding: 10.,
+            modified: false,
             on_click: None,
         }
     }
@@ -66,6 +68,12 @@ impl TreeRow {
 
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// An open tab has edits not saved to this request: a dot after the name.
+    pub fn modified(mut self, modified: bool) -> Self {
+        self.modified = modified;
         self
     }
 
@@ -137,7 +145,18 @@ impl RenderOnce for TreeRow {
                     label
                         .text_color(if self.selected { p.text } else { p.text_dim })
                         .child(self.label),
-                ),
+                )
+                .when(self.modified, |s| {
+                    s.child(
+                        div()
+                            .id("modified")
+                            .flex_none()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(p.warn)
+                            .test_support(),
+                    )
+                }),
         }
         .test_support()
     }

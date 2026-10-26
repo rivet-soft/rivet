@@ -171,13 +171,54 @@ fn find_request<'a>(project: &'a Project, id: &str) -> Option<(&'a str, &'a Requ
 }
 
 /// Same request content, ignoring the owning-collection back-reference (tabs
-/// opened from a collection carry it, stored copies may not).
+/// opened from a collection carry it, stored copies may not). Runs for every
+/// tab on every frame, so it compares in place instead of cloning; the
+/// exhaustive destructuring makes a new field a compile error here.
 fn same_request(a: &RequestSpec, b: &RequestSpec) -> bool {
-    let mut a = a.clone();
-    let mut b = b.clone();
-    a.collection_id = None;
-    b.collection_id = None;
-    a == b
+    let RequestSpec {
+        id,
+        name,
+        method,
+        url,
+        params,
+        headers,
+        body,
+        auth,
+        spec_ref,
+        collection_id: _,
+        folder,
+        follow_redirects,
+        max_redirects,
+        scripts,
+        kind,
+        ws,
+    } = a;
+    *id == b.id
+        && *name == b.name
+        && *method == b.method
+        && *url == b.url
+        && *params == b.params
+        && *headers == b.headers
+        && *body == b.body
+        && *auth == b.auth
+        && *spec_ref == b.spec_ref
+        && *folder == b.folder
+        && *follow_redirects == b.follow_redirects
+        && *max_redirects == b.max_redirects
+        && *scripts == b.scripts
+        && *kind == b.kind
+        && *ws == b.ws
+}
+
+/// Where a tab's request stands relative to its collection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SaveState {
+    /// Not in any collection yet (new, from history, from a spec).
+    Draft,
+    /// Matches the copy stored in `collection` (folder path, if any).
+    Saved { collection: String, folder: Option<String> },
+    /// Stored in `collection`, with edits not saved there yet.
+    Modified { collection: String, folder: Option<String> },
 }
 
 fn host_of(url: &str) -> String {
@@ -993,6 +1034,37 @@ impl Workspace {
             return;
         }
         self.force_close_tab_at(ix, window, cx);
+    }
+
+    /// Whether tab `ix` is saved in a collection, modified, or a draft.
+    pub fn tab_save_state(&self, ix: usize) -> Option<SaveState> {
+        let tab = self.tabs.get(ix)?;
+        Some(
+            match self.project.collections.iter().find_map(|c| {
+                c.requests.iter().find(|r| r.id == tab.request.id).map(|r| (c, r))
+            }) {
+                None => SaveState::Draft,
+                Some((c, saved)) => {
+                    let collection = c.name.clone();
+                    let folder = saved.folder.clone().filter(|f| !f.is_empty());
+                    if same_request(saved, &tab.request) {
+                        SaveState::Saved { collection, folder }
+                    } else {
+                        SaveState::Modified { collection, folder }
+                    }
+                }
+            },
+        )
+    }
+
+    /// Ids of collection requests whose open tab has unsaved edits (sidebar dots).
+    pub fn modified_request_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = (0..self.tabs.len())
+            .filter(|&ix| matches!(self.tab_save_state(ix), Some(SaveState::Modified { .. })))
+            .map(|ix| self.tabs[ix].request.id.clone())
+            .collect();
+        ids.sort();
+        ids
     }
 
     /// Whether the tab has changes not saved to its collection (or, for a

@@ -1393,3 +1393,69 @@ fn collections_export_in_three_formats(cx: &mut TestAppContext) {
     });
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[gpui_kit::test]
+fn save_state_shows_saved_modified_and_draft(cx: &mut TestAppContext) {
+    use rivet::app::SaveState;
+    let mut p = project();
+    p.collections[0].folders = vec!["Orders".into()];
+    let mut saved = rivet::core::RequestSpec::new("List orders", Method::Get, "{{baseUrl}}/orders");
+    saved.collection_id = Some(p.collections[0].id.clone());
+    saved.folder = Some("Orders".into());
+    p.collections[0].requests.push(saved.clone());
+    p.open_tabs = vec![saved];
+    p.active_tab = Some(0);
+    let (view, window) = open_with(cx, p);
+
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("save-state-saved").is_some());
+        assert!(w.within(("saved", 0usize)).try_find("modified").is_none());
+    });
+    view.read_with(window, |v, _| {
+        assert_eq!(
+            v.tab_save_state(0),
+            Some(SaveState::Saved { collection: "Мои запросы".into(), folder: Some("Orders".into()) })
+        );
+    });
+
+    // An edit in the tab: modified everywhere it shows.
+    window.update(|w, cx| {
+        w.click("url", cx);
+        w.press("cmd-right", cx);
+        w.input("/42", cx);
+    });
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("save-state-modified").is_some());
+        assert!(w.within(("saved", 0usize)).try_find("modified").is_some());
+        assert!(w.try_find(child(child(("tab", 0usize), "close"), "dirty")).is_some());
+    });
+    view.read_with(window, |v, _| {
+        assert!(matches!(v.tab_save_state(0), Some(SaveState::Modified { .. })));
+        assert_eq!(v.modified_request_ids(), vec![v.tabs[0].request.id.clone()]);
+    });
+
+    // ⌘S writes it to the collection.
+    window.update(|w, cx| w.press("cmd-s", cx));
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("save-state-saved").is_some());
+        assert!(w.within(("saved", 0usize)).try_find("modified").is_none());
+    });
+    view.read_with(window, |v, _| {
+        assert_eq!(v.project.collections[0].requests[0].url, "{{baseUrl}}/orders/42");
+        assert!(v.modified_request_ids().is_empty());
+    });
+
+    // A new tab is a draft outside collections; "Сохранить…" asks where.
+    view.update_in(window, |v, window, cx| v.new_tab(window, cx));
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("save-state-draft").is_some());
+        w.click("save-to-collection", cx);
+        w.render_frame(cx);
+        assert!(w.try_find("collection-dialog").is_some());
+    });
+    view.read_with(window, |v, _| assert_eq!(v.tab_save_state(1), Some(SaveState::Draft)));
+}

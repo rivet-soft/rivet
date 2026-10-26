@@ -4,12 +4,12 @@ use gpui_kit::*;
 
 use super::sidebar::{SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH};
 use super::ws_view::{WsBadge, WsStatus};
-use super::{MODE_RAIL_WIDTH, Workspace, is_destructive};
+use super::{MODE_RAIL_WIDTH, SaveState, Workspace, is_destructive};
 use crate::core::{Method, new_id, vars, ws};
 use crate::theme::{ActivePalette, MONO};
 use crate::ui::{
     Button, ButtonVariant, ConfirmPopover, IconButton, IconName, MethodBadge, StatusDot, PANE_SPLITTER_WIDTH,
-    PaneSplitter, Pill, Placement, Popover, Tab, TabAction, TabActionsMenu, TabBar, icon,
+    PaneSplitter, Pill, Placement, Popover, Tab, TabAction, TabActionsMenu, TabBar, Tooltip, icon,
     shortcut_hint, var_token_element,
 };
 
@@ -131,7 +131,18 @@ impl Workspace {
                 };
                 let tab = Tab::new(("tab", ix), label);
                 let tab = if is_ws { tab } else { tab.method(t.request.method) };
+                let hint = match self.tab_save_state(ix) {
+                    Some(SaveState::Saved { collection, folder }) => format!(
+                        "Сохранено в «{}»",
+                        folder.map_or(collection.clone(), |f| format!("{collection} / {f}"))
+                    ),
+                    Some(SaveState::Modified { collection, .. }) => {
+                        format!("Есть изменения, не сохранённые в «{collection}»")
+                    }
+                    _ => "Не сохранён в коллекции".to_string(),
+                };
                 tab.active(self.active_tab == Some(ix))
+                    .hint(hint)
                     .draggable(ix)
                     .on_tab_drop(cx.listener(move |this, drag: &crate::ui::TabDrag, _, cx| {
                         this.move_tab(drag.index, ix, cx)
@@ -462,6 +473,7 @@ impl Workspace {
             .py(px(10.))
             .border_b_1()
             .border_color(p.border)
+            .child(self.render_save_state(cx))
             .child(
                 div()
                     .flex()
@@ -533,6 +545,126 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// Line above the URL: where the request lives (`Collection / Folder /
+    /// Name`) and whether it is saved there, has unsaved edits, or is a draft
+    /// outside any collection.
+    fn render_save_state(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = *cx.palette();
+        let Some(ix) = self.active_tab else {
+            return div().into_any_element();
+        };
+        let Some(state) = self.tab_save_state(ix) else {
+            return div().into_any_element();
+        };
+        let name = self.tabs[ix].request.name.clone();
+        let name = if name.trim().is_empty() { "Untitled".to_string() } else { name };
+        let path = |collection: &str, folder: &Option<String>| {
+            let mut parts = vec![collection.to_string()];
+            if let Some(folder) = folder {
+                parts.extend(folder.split(" / ").map(str::to_string));
+            }
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .min_w_0()
+                .text_color(p.text_dim)
+                .child(icon(IconName::Folder, 12., p.text_dim))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(format!("{} /", parts.join(" / "))),
+                )
+                .child(div().flex_none().text_color(p.text).child(name.clone()))
+        };
+        let (location, status) = match &state {
+            SaveState::Saved { collection, folder } => (
+                path(collection, folder).into_any_element(),
+                div()
+                    .id("save-state-saved")
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_color(p.text_dim)
+                    .child(icon(IconName::Check, 12., p.online))
+                    .child("Сохранено")
+                    .test_support()
+                    .into_any_element(),
+            ),
+            SaveState::Modified { collection, folder } => (
+                path(collection, folder).into_any_element(),
+                div()
+                    .id("save-state-modified")
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .text_color(p.warn)
+                    .child(div().size(px(6.)).rounded_full().bg(p.warn))
+                    .child("Есть несохранённые изменения")
+                    .child(
+                        div()
+                            .text_color(p.text_dim)
+                            .font_family(MONO)
+                            .child(shortcut_hint("⌘S", "Ctrl+S")),
+                    )
+                    .tooltip(
+                        Tooltip::new("Изменения есть только во вкладке")
+                            .part("Сохраните, чтобы записать их в коллекцию")
+                            .build(),
+                    )
+                    .test_support()
+                    .into_any_element(),
+            ),
+            SaveState::Draft => (
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .min_w_0()
+                    .text_color(p.text_dim)
+                    .child(icon(IconName::FileText, 12., p.text_dim))
+                    .child(div().text_color(p.text).child(name.clone()))
+                    .into_any_element(),
+                div()
+                    .id("save-state-draft")
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_color(p.text_dim)
+                    .child("Не сохранён в коллекции")
+                    .child(
+                        div()
+                            .id("save-to-collection")
+                            .px(px(6.))
+                            .rounded(px(4.))
+                            .text_color(p.accent)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(p.surface_hi))
+                            .on_click(cx.listener(|this, _, window, cx| this.save_request(window, cx)))
+                            .child("Сохранить…")
+                            .test_support(),
+                    )
+                    .test_support()
+                    .into_any_element(),
+            ),
+        };
+        div()
+            .id("save-state")
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .h(px(18.))
+            .text_size(px(11.5))
+            .child(location)
+            .child(div().flex_none().child(status))
+            .test_support()
+            .into_any_element()
+    }
+
     fn render_ws_request_line(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = *cx.palette();
         let Some(request) = self.active() else {
@@ -589,6 +721,7 @@ impl Workspace {
             .py(px(10.))
             .border_b_1()
             .border_color(p.border)
+            .child(self.render_save_state(cx))
             .child(
                 div()
                     .flex()

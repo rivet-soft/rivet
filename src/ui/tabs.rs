@@ -25,6 +25,7 @@ pub struct Tab {
     on_menu_dismiss: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     drag: Option<TabDrag>,
     on_drop: Option<Rc<dyn Fn(&TabDrag, &mut Window, &mut App)>>,
+    hint: Option<SharedString>,
 }
 
 /// Drag payload of a tab being reordered: its index in the bar.
@@ -72,7 +73,14 @@ impl Tab {
             on_menu_dismiss: None,
             drag: None,
             on_drop: None,
+            hint: None,
         }
+    }
+
+    /// Hover hint (e.g. where the request is saved).
+    pub fn hint(mut self, hint: impl Into<SharedString>) -> Self {
+        self.hint = Some(hint.into());
+        self
     }
 
     /// Makes the tab draggable as tab `index` (reordering).
@@ -179,6 +187,7 @@ impl RenderOnce for Tab {
             .when_some(self.on_click, |s, f| {
                 s.on_click(move |e, w, cx| f(e, w, cx))
             })
+            .when_some(self.hint, |s, hint| s.tooltip(super::Tooltip::new(hint).build()))
             .when_some(self.drag, |s, drag| {
                 s.on_drag(drag, |drag, _, _, cx| {
                     cx.new(|_| TabDragPreview { label: drag.label.clone() })

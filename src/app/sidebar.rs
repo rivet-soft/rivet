@@ -306,6 +306,7 @@ impl Workspace {
         collapsed.sort();
         collapsed.hash(&mut h);
         self.active().map(|r| &r.id).hash(&mut h);
+        self.modified_request_ids().hash(&mut h);
         (cx.palette().mode as u8).hash(&mut h);
         for c in &self.project.collections {
             (&c.id, &c.name, &c.folders, c.source.is_some()).hash(&mut h);
@@ -342,6 +343,7 @@ impl Workspace {
     fn render_collections(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = *cx.palette();
         let active_id = self.active().map(|r| r.id.clone());
+        let modified = self.modified_request_ids();
 
         let mut tree = div()
             .id("collection-tree")
@@ -643,6 +645,7 @@ impl Workspace {
                                 )
                                 .depth(request_depth)
                                 .selected(selected)
+                                .modified(modified.binary_search(&r.id).is_ok())
                                 // Room for the absolutely positioned "···" menu button.
                                 .trailing_padding(40.)
                                 .on_click(cx.listener(
