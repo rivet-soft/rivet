@@ -2,6 +2,7 @@ use gpui_kit::component::input::Input;
 use crate::ui::ScrollY as _;
 use crate::core::tree_ops::{self, Clip, ClipItem};
 use gpui_kit::*;
+use gpui_kit::prelude::FluentBuilder as _;
 
 use super::collection_dialog::DialogMode;
 use super::collection_panel::delete_collection_confirm;
@@ -81,6 +82,8 @@ impl Workspace {
                 }
             }
             (SidebarMenu::Collection(id), "paste") => self.paste_into(&id, None, window, cx),
+            (SidebarMenu::Collection(id), "mock-start") => self.start_mock(&id, cx),
+            (SidebarMenu::Collection(id), "mock-stop") => self.stop_mock(&id, cx),
             (SidebarMenu::Folder(id, folder), "paste") => {
                 self.paste_into(&id, Some(&folder), window, cx)
             }
@@ -306,6 +309,12 @@ impl Workspace {
     ) -> AnyElement {
         let open = self.collection_menu.as_ref() == Some(&target);
         let paste = self.sidebar_clip.is_some();
+        let mock_running = match &target {
+            SidebarMenu::Collection(id) => {
+                matches!(self.mocks.get(id), Some(super::MockState::Running(_) | super::MockState::Starting))
+            }
+            _ => false,
+        };
         let rows: Vec<(&'static str, &'static str)> = match target {
             SidebarMenu::Collection(_) => {
                 let mut rows = vec![
@@ -313,6 +322,7 @@ impl Workspace {
                     ("new-folder", "Новая папка"),
                     ("rename", "Переименовать"),
                     ("duplicate", "Дублировать коллекцию"),
+                    if mock_running { ("mock-stop", "Остановить мок") } else { ("mock-start", "Запустить мок") },
                 ];
                 if paste {
                     rows.push(("paste", "Вставить"));
@@ -444,6 +454,20 @@ impl Workspace {
         self.filter.hash(&mut h);
         self.collection_menu.hash(&mut h);
         self.sidebar_clip.hash(&mut h);
+        let mut mocks: Vec<(&String, u8)> = self
+            .mocks
+            .iter()
+            .map(|(id, m)| {
+                let state = match m {
+                    super::MockState::Starting => 0,
+                    super::MockState::Running(_) => 1,
+                    super::MockState::Failed(_) => 2,
+                };
+                (id, state)
+            })
+            .collect();
+        mocks.sort();
+        mocks.hash(&mut h);
         self.collection_delete_confirm.hash(&mut h);
         let mut collapsed: Vec<&String> = self.collapsed.iter().collect();
         collapsed.sort();
@@ -575,6 +599,26 @@ impl Workspace {
                                 }
                                 cx.notify();
                             })),
+                    )
+                    .when(
+                        matches!(self.mocks.get(&col.id), Some(super::MockState::Running(_))),
+                        |d| {
+                            d.child(
+                                div()
+                                    .id(("collection-mock-badge", ci))
+                                    .absolute()
+                                    .right(px(36.))
+                                    .top(px(5.))
+                                    .px(px(5.))
+                                    .rounded(px(4.))
+                                    .bg(p.online.opacity(0.15))
+                                    .text_size(px(9.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(p.online)
+                                    .child("MOCK")
+                                    .test_support(),
+                            )
+                        },
                     )
                     .child(div().absolute().right(px(8.)).top(px(2.)).child(
                         self.collection_delete_popover(

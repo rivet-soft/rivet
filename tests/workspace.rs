@@ -1826,3 +1826,84 @@ fn settings_have_a_mocks_section(cx: &mut TestAppContext) {
         assert_eq!(v.project.settings.mock.engine, rivet::core::mock::MockEngine::WireMock);
     });
 }
+
+#[gpui_kit::test]
+fn collections_offer_a_mock_server(cx: &mut TestAppContext) {
+    let (view, window) = open(cx);
+    window.update(|w, cx| {
+        w.click("sidebar-menu-trigger-collection-0", cx);
+        w.render_frame(cx);
+        assert!(w.try_find("sidebar-action-collection-0-mock-start").is_some());
+    });
+    view.update_in(window, |v, window, cx| v.set_rail(RailMode::Collections, window, cx));
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("collection-mock-start").is_some());
+    });
+    view.read_with(window, |v, _| assert!(v.mock_state(&v.project.collections[0].id).is_none()));
+}
+
+/// Real Docker + WireMock through the UI: `cargo test --test workspace live_mock -- --ignored`.
+#[gpui_kit::test]
+#[ignore]
+fn live_mock_through_the_ui(cx: &mut TestAppContext) {
+    use rivet::app::MockState;
+    let mut p = project();
+    let mut list = rivet::core::RequestSpec::new("Orders", Method::Get, "{{baseUrl}}/orders/:id");
+    list.collection_id = Some(p.collections[0].id.clone());
+    list.examples = vec![rivet::core::Example {
+        id: "e".into(),
+        name: "ok".into(),
+        status: 200,
+        status_text: "OK".into(),
+        headers: vec![KeyValue::new("Content-Type", "application/json")],
+        body: r#"{"id":7}"#.into(),
+        url: None,
+        saved_at: 0,
+    }];
+    p.collections[0].requests.push(list.clone());
+    p.open_tabs = vec![list];
+    p.active_tab = Some(0);
+    let id = p.collections[0].id.clone();
+    let (view, window) = open_with(cx, p);
+    view.update(window, |v, cx| v.start_mock(&id, cx));
+    let mut url = None;
+    for _ in 0..600 {
+        window.run_until_parked();
+        match view.read_with(window, |v, _| v.mock_state(&id).cloned()) {
+            Some(MockState::Running(run)) => {
+                url = Some(run.url);
+                break;
+            }
+            Some(MockState::Failed(e)) => panic!("{e}"),
+            _ => std::thread::sleep(Duration::from_millis(200)),
+        }
+    }
+    let url = url.expect("mock started");
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find(("collection-mock-badge", 0usize)).is_some());
+    });
+    // The Mock environment points the request at it.
+    view.update(window, |v, cx| v.create_mock_environment(&id, cx));
+    view.read_with(window, |v, _| assert_eq!(v.env().unwrap().var("baseUrl"), Some(url.as_str())));
+    view.update_in(window, |v, window, cx| {
+        let mut r = v.tabs[0].request.clone();
+        r.path_vars = vec![KeyValue::new("id", "7")];
+        v.tabs[0].request = r;
+        v.send(window, cx)
+    });
+    wait_sent(&view, window, 0);
+    view.read_with(window, |v, _| match &v.tabs[0].response {
+        ResponseState::Done { response, .. } => assert_eq!(response.body, br#"{"id":7}"#.to_vec()),
+        other => panic!("{other:?}"),
+    });
+    view.update(window, |v, cx| v.stop_mock(&id, cx));
+    window.run_until_parked();
+    std::thread::sleep(Duration::from_millis(2500));
+    let left = std::process::Command::new(rivet::core::mock::find_docker().unwrap())
+        .args(["ps", "-q", "--filter", &format!("name={}", rivet::core::mock::container_name(&id))])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&left.stdout).trim().is_empty(), "container stopped");
+}

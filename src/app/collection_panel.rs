@@ -1,5 +1,6 @@
 //! Collection management and collection-scoped variables.
 
+use crate::theme::MONO;
 use crate::ui::ScrollY as _;
 use crate::core::export::ExportFormat;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -19,6 +20,11 @@ pub enum CollectionPanelEvent {
     Delete(String),
     /// Save the collection to a file in this format.
     Export(String, ExportFormat),
+    StartMock(String),
+    StopMock(String),
+    ReloadMock(String),
+    /// Create/activate an environment whose baseUrl is the running mock.
+    MockEnvironment(String),
 }
 impl EventEmitter<CollectionPanelEvent> for CollectionPanel {}
 
@@ -35,6 +41,8 @@ pub struct CollectionPanel {
     selected: usize,
     name: Entity<InputState>,
     description: Entity<gpui_kit::component::input::TextareaState>,
+    /// Mock servers by collection id (from the workspace).
+    mocks: std::collections::HashMap<String, super::MockState>,
     rows: Vec<VarRow>,
     /// The delete confirmation for the selected collection is open.
     pub confirm_delete: bool,
@@ -77,6 +85,7 @@ impl CollectionPanel {
             selected: 0,
             name,
             description,
+            mocks: Default::default(),
             rows: Vec::new(),
             confirm_delete: false,
             _name_subscription: name_subscription,
@@ -166,6 +175,113 @@ impl CollectionPanel {
             })
             .collect();
         cx.notify();
+    }
+
+    pub fn set_mocks(&mut self, mocks: std::collections::HashMap<String, super::MockState>, cx: &mut Context<Self>) {
+        self.mocks = mocks;
+        cx.notify();
+    }
+
+    /// "Мок-сервер" block of the selected collection.
+    fn render_mock(&self, col: &Collection, cx: &mut Context<Self>) -> AnyElement {
+        use super::MockState;
+        let p = *cx.palette();
+        let id = col.id.clone();
+        let answered = crate::core::mock::answered_requests(col);
+        let event = |make: fn(String) -> CollectionPanelEvent, id: &String| {
+            let id = id.clone();
+            cx.listener(move |_, _, _, cx| cx.emit(make(id.clone())))
+        };
+        let status: AnyElement = match self.mocks.get(&id) {
+            Some(MockState::Running(run)) => {
+                let url = run.url.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .id("collection-mock-status")
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().size(px(8.)).rounded_full().bg(p.online))
+                            .child(div().font_family(MONO).child(run.url.clone()))
+                            .child(div().text_color(p.text_dim).child(format!(
+                                "{} · запросов с примерами: {}",
+                                run.engine.label(),
+                                run.answered
+                            )))
+                            .test_support(),
+                    )
+                    .children(run.notes.iter().map(|n| div().text_size(px(11.5)).text_color(p.warn).child(n.clone())))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(8.))
+                            .child(Button::new("collection-mock-copy", "Копировать URL").on_click(
+                                move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(url.clone())),
+                            ))
+                            .child(
+                                Button::new("collection-mock-env", "Окружение Mock")
+                                    .on_click(event(CollectionPanelEvent::MockEnvironment, &id)),
+                            )
+                            .child(
+                                Button::new("collection-mock-reload", "Обновить")
+                                    .on_click(event(CollectionPanelEvent::ReloadMock, &id)),
+                            )
+                            .child(
+                                Button::new("collection-mock-stop", "Остановить")
+                                    .on_click(event(CollectionPanelEvent::StopMock, &id)),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            Some(MockState::Starting) => div()
+                .id("collection-mock-status")
+                .text_color(p.text_dim)
+                .child("Запуск… При первом запуске Docker скачивает образ — это может занять минуту.")
+                .test_support()
+                .into_any_element(),
+            other => div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .when_some(
+                    match other {
+                        Some(MockState::Failed(e)) => Some(e.clone()),
+                        _ => None,
+                    },
+                    |d, e| d.child(div().id("collection-mock-error").text_color(p.danger).child(e).test_support()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(
+                            Button::new("collection-mock-start", "Запустить мок")
+                                .primary()
+                                .on_click(event(CollectionPanelEvent::StartMock, &id)),
+                        )
+                        .child(div().text_color(p.text_dim).child(format!("запросов с примерами: {answered}"))),
+                )
+                .into_any_element(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .pt(px(12.))
+            .border_t_1()
+            .border_color(p.border)
+            .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Мок-сервер"))
+            .child(div().text_color(p.text_dim).child(
+                "Отвечает сохранёнными примерами запросов (закладка в ответе). Конкретный пример — заголовком x-mock-response-name или x-mock-response-code. Движок и порт — в Настройки → Моки.",
+            ))
+            .child(status)
+            .into_any_element()
     }
 
     fn changed(&self, cx: &mut Context<Self>) {
@@ -277,6 +393,7 @@ impl Render for CollectionPanel {
         let p = *cx.palette();
         let selected = self.collections.get(self.selected);
         let delete = selected.map(|col| self.delete_confirm(col, cx));
+        let mock_block = selected.map(|col| self.render_mock(col, cx));
         let items = self.collections.iter().enumerate().map(|(i, col)| {
             div()
                 .id(("collection-list-item", i))
@@ -367,6 +484,7 @@ impl Render for CollectionPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_cookies(cx))))
                         .child(Button::new("collection-cookies-clear", "Очистить cookies")
                             .on_click({ let id = col.id.clone(); cx.listener(move |_, _, _, cx| cx.emit(CollectionPanelEvent::ClearCookies(id.clone()))) })))
+                    .children(mock_block)
                     .child(div().pt(px(12.)).border_t_1().border_color(p.border)
                         .text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Экспорт"))
                     .child(div().text_color(p.text_dim).child("Rivet сохраняет всё без потерь. Postman и OpenAPI — для обмена с другими инструментами; то, что формат не поддерживает, будет перечислено после сохранения."))

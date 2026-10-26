@@ -7,6 +7,8 @@ pub mod browser;
 mod browser_win;
 mod collection_dialog;
 mod cookies;
+mod mocks;
+pub use mocks::MockState;
 pub mod collection_panel;
 pub mod env_panel;
 pub mod history_panel;
@@ -370,6 +372,9 @@ pub struct Workspace {
     http_sessions: http::HttpSessions,
     /// The cookie manager window is open.
     pub cookies_open: bool,
+    /// Collection mock servers by collection id.
+    mocks: HashMap<String, MockState>,
+    mock_tasks: HashMap<String, Task<()>>,
     cookie_url: Entity<InputState>,
     cookie_value: Entity<InputState>,
     pub history_panel: Entity<HistoryPanel>,
@@ -552,6 +557,8 @@ impl Workspace {
             // The debounced save may still be pending when the app quits.
             cx.on_app_quit(|this, _| {
                 this.save_now();
+                // Mock containers must not outlive the app.
+                this.stop_all_mocks();
                 async {}
             }),
         ];
@@ -605,6 +612,8 @@ impl Workspace {
             settings_panel,
             http_sessions: http::HttpSessions::default(),
             cookies_open: false,
+            mocks: HashMap::new(),
+            mock_tasks: HashMap::new(),
             cookie_url,
             cookie_value,
             history_panel,
@@ -1096,7 +1105,17 @@ impl Workspace {
         self.tabs[ix].request.examples.push(example);
         self.schedule_save(cx);
         self.notify_user(format!("Пример «{name}» сохранён"), cx);
+        let collection = self.collection_id_of(&id);
+        self.reload_mock_if_running(collection.as_deref(), cx);
         cx.notify();
+    }
+
+    fn collection_id_of(&self, request_id: &str) -> Option<String> {
+        self.project
+            .collections
+            .iter()
+            .find(|c| c.requests.iter().any(|r| r.id == request_id))
+            .map(|c| c.id.clone())
     }
 
     /// Opens example `ei` of saved request `idx` of collection `col`: the
@@ -1153,6 +1172,8 @@ impl Workspace {
         }
         self.schedule_save(cx);
         self.notify_user(format!("Пример «{}» удалён", removed.name), cx);
+        let collection = self.collection_id_of(&id);
+        self.reload_mock_if_running(collection.as_deref(), cx);
         cx.notify();
     }
 
@@ -1974,6 +1995,8 @@ impl Workspace {
             self.sync_collection_panel(window, cx);
             self.schedule_save(cx);
             self.notify_user("Запрос сохранён", cx);
+            let collection = self.collection_id_of(&request.id);
+            self.reload_mock_if_running(collection.as_deref(), cx);
         } else {
             let name = if request.name.trim().is_empty() || request.name == "Untitled" {
                 request_name_from_url(&request.url)
@@ -2098,6 +2121,10 @@ impl Workspace {
             }
             CollectionPanelEvent::Delete(id) => self.delete_collection(id, window, cx),
             CollectionPanelEvent::Export(id, format) => self.prompt_export_collection(id, *format, cx),
+            CollectionPanelEvent::StartMock(id) => self.start_mock(id, cx),
+            CollectionPanelEvent::StopMock(id) => self.stop_mock(id, cx),
+            CollectionPanelEvent::ReloadMock(id) => self.reload_mock(id, cx),
+            CollectionPanelEvent::MockEnvironment(id) => self.create_mock_environment(id, cx),
         }
     }
 
