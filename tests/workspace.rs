@@ -1804,3 +1804,25 @@ fn long_lists_scroll_in_cached_views(cx: &mut TestAppContext) {
     let after = window.update(|w, _| w.within("req-params").find(("key", 3usize)).bounds().origin.y);
     assert!(after < before, "params table scrolls: {before:?} → {after:?}");
 }
+
+#[gpui_kit::test]
+fn settings_have_a_mocks_section(cx: &mut TestAppContext) {
+    let (view, window) = open(cx);
+    view.update_in(window, |v, window, cx| v.set_rail(RailMode::Settings, window, cx));
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("settings-mocks").is_some());
+        assert!(w.try_find("settings-docker-status").is_some());
+        w.click("settings-mock-port", cx);
+        w.press("cmd-a", cx);
+        w.input("9100", cx);
+        w.click("settings-mock-image", cx);
+        w.input("wiremock/wiremock:latest", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| {
+        assert_eq!(v.project.settings.mock.port, 9100);
+        assert_eq!(v.project.settings.mock.image, "wiremock/wiremock:latest");
+        assert_eq!(v.project.settings.mock.engine, rivet::core::mock::MockEngine::WireMock);
+    });
+}

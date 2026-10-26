@@ -29,6 +29,11 @@ pub struct SettingsPanel {
     settings: Settings,
     proxy: Entity<InputState>,
     timeout: Entity<InputState>,
+    mock_port: Entity<InputState>,
+    mock_image: Entity<InputState>,
+    /// Docker check for mocks; `None` while it runs.
+    pub docker: Option<crate::core::mock::DockerStatus>,
+    _docker_task: Option<Task<()>>,
     redirect_limit: Entity<InputState>,
     data_path: String,
     /// `project.json`; the MCP activity log lives next to it.
@@ -92,7 +97,36 @@ impl SettingsPanel {
             input.set_value(settings.max_redirects.to_string(), window, cx);
             input
         });
+        let mock_port = cx.new(|cx| {
+            let mut input = InputState::new(window, cx).placeholder("8089");
+            input.set_value(settings.mock.port.to_string(), window, cx);
+            input
+        });
+        let mock_image = cx.new(|cx| {
+            let mut input = InputState::new(window, cx).placeholder(settings.mock.engine.default_image());
+            input.set_value(settings.mock.image.clone(), window, cx);
+            input
+        });
         let subscriptions = vec![
+            cx.subscribe_in(&mock_port, window, |this, state, ev: &InputEvent, _, cx| {
+                if let InputEvent::Change = ev {
+                    if let Ok(port) = state.read(cx).value().trim().parse::<u16>() {
+                        if port >= 1024 && this.settings.mock.port != port {
+                            this.settings.mock.port = port;
+                            cx.emit(SettingsPanelEvent::Changed(this.settings.clone()));
+                        }
+                    }
+                }
+            }),
+            cx.subscribe_in(&mock_image, window, |this, state, ev: &InputEvent, _, cx| {
+                if let InputEvent::Change = ev {
+                    let image = state.read(cx).value().trim().to_string();
+                    if this.settings.mock.image != image {
+                        this.settings.mock.image = image;
+                        cx.emit(SettingsPanelEvent::Changed(this.settings.clone()));
+                    }
+                }
+            }),
             cx.subscribe_in(&proxy, window, |this, state, ev: &InputEvent, _, cx| {
                 if let InputEvent::Change = ev {
                     let value = state.read(cx).value().trim().to_string();
@@ -127,6 +161,10 @@ impl SettingsPanel {
         ];
         Self {
             scrolls: Default::default(),
+            mock_port,
+            mock_image,
+            docker: None,
+            _docker_task: None,
             settings,
             proxy,
             timeout,
@@ -196,6 +234,7 @@ impl SettingsPanel {
             self._activity_task = None;
             return;
         }
+        self.refresh_docker(cx);
         self.refresh_status(cx);
         self.refresh_activity(cx);
         self._activity_task = Some(cx.spawn(async move |this, cx| {
@@ -323,7 +362,128 @@ impl SettingsPanel {
         self.redirect_limit.update(cx, |s, cx| {
             s.set_value(settings.max_redirects.to_string(), window, cx)
         });
+        self.mock_port.update(cx, |s, cx| s.set_value(settings.mock.port.to_string(), window, cx));
+        self.mock_image.update(cx, |s, cx| s.set_value(settings.mock.image.clone(), window, cx));
         cx.notify();
+    }
+
+    /// Re-checks Docker in the background (the panel shows "Проверка…").
+    pub fn refresh_docker(&mut self, cx: &mut Context<Self>) {
+        self.docker = None;
+        let check = cx.background_spawn(async { crate::core::mock::docker_status() });
+        self._docker_task = Some(cx.spawn(async move |this, cx| {
+            let status = check.await;
+            this.update(cx, |this, cx| {
+                this.docker = Some(status);
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Settings → Моки: engine, Docker state, port and image.
+    fn render_mocks(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::core::mock::{DockerStatus, MockEngine};
+        let p = *cx.palette();
+        let row = |title: &'static str, help: &'static str| {
+            div()
+                .w(px(260.))
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(div().text_size(px(13.)).child(title))
+                .child(div().text_size(px(11.)).text_color(p.text_dim).child(help))
+        };
+        let (dot, text, install) = match &self.docker {
+            None => (p.text_dim, "Проверка Docker…".to_string(), false),
+            Some(DockerStatus::Ready { version, .. }) => (p.online, format!("Docker {version} готов"), false),
+            Some(DockerStatus::NotRunning { message, .. }) => {
+                (p.warn, format!("Docker не запущен — откройте Docker Desktop ({message})"), false)
+            }
+            Some(DockerStatus::Missing) => (p.danger, "Docker не найден — моки запускаются в Docker".to_string(), true),
+        };
+        let view = cx.entity().downgrade();
+        div()
+            .id("settings-mocks")
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .pt(px(16.))
+            .border_t_1()
+            .border_color(p.border)
+            .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Моки"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(20.))
+                    .child(row("Движок", "Сервер, который отвечает сохранёнными примерами коллекции"))
+                    .child(
+                        Segmented::new("settings-mock-engine")
+                            .items(MockEngine::ALL.map(MockEngine::label))
+                            .selected(
+                                MockEngine::ALL.iter().position(|e| *e == self.settings.mock.engine).unwrap_or(0),
+                            )
+                            .on_select(move |ix, _, cx| {
+                                view.update(cx, |this, cx| {
+                                    if let Some(engine) = MockEngine::ALL.get(ix) {
+                                        this.settings.mock.engine = *engine;
+                                        cx.emit(SettingsPanelEvent::Changed(this.settings.clone()));
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(20.))
+                    .child(row("Docker", "Мок запускается в контейнере; образ скачивается при первом запуске"))
+                    .child(
+                        div()
+                            .id("settings-docker-status")
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().size(px(8.)).rounded_full().bg(dot))
+                            .child(div().text_size(px(12.)).child(text))
+                            .test_support(),
+                    )
+                    .when(install, |d| {
+                        d.child(
+                            Button::new("settings-docker-install", "Установить Docker")
+                                .on_click(|_, _, cx| cx.open_url("https://docs.docker.com/get-docker/")),
+                        )
+                    })
+                    .child(
+                        Button::new("settings-docker-recheck", "Проверить снова")
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_docker(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(20.))
+                    .child(row("Порт", "Первый порт на 127.0.0.1; для следующих моков — свободные дальше"))
+                    .child(div().w(px(110.)).child(Input::new(&self.mock_port).id("settings-mock-port").h(px(30.)))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(20.))
+                    .child(row("Образ Docker", "Пусто — образ движка по умолчанию"))
+                    .child(div().w(px(320.)).child(
+                        Input::new(&self.mock_image).id("settings-mock-image").font_family(MONO).h(px(30.)),
+                    )),
+            )
+            .test_support()
     }
 }
 
@@ -883,6 +1043,7 @@ impl Render for SettingsPanel {
                         ),
                     ),
             )
+            .child(self.render_mocks(cx))
             .child(self.render_mcp(cx))
             .child(self.render_updates(cx))
             .child(
