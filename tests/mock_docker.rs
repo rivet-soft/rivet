@@ -45,6 +45,9 @@ fn wiremock_in_docker_serves_examples() {
     let settings = MockSettings::default();
     let port = mock::free_port(settings.port, &[]).unwrap();
     let run = mock::start(&docker, &settings, &c, None, &dir, port).expect("mock starts");
+    let found = mock::running_mocks(&docker).unwrap();
+    let mine = found.iter().find(|(id, _)| *id == c.id).expect("discovered by label");
+    assert_eq!((mine.1.port, &mine.1.container, &mine.1.dir), (port, &run.container, &dir));
     let result = std::panic::catch_unwind(|| {
         assert_eq!(get(&format!("{}/users/7", run.url), None), (200, r#"{"id":1}"#.into()));
         assert_eq!(get(&format!("{}/users/7", run.url), Some(("x-mock-response-name", "missing"))).0, 404);

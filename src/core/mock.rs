@@ -273,14 +273,38 @@ pub fn container_name(collection_id: &str) -> String {
 }
 
 /// `docker run …` arguments for a mock serving `dir` on host `port`.
-pub fn run_args(settings: &MockSettings, name: &str, dir: &Path, port: u16) -> Vec<String> {
+/// Labels let the app and `rivet mcp` find each other's mocks.
+const LABEL_COLLECTION: &str = "rivet.collection";
+const LABEL_PORT: &str = "rivet.port";
+const LABEL_ENGINE: &str = "rivet.engine";
+const LABEL_DIR: &str = "rivet.dir";
+
+/// Folder with a collection's mock files: `mocks/<collection id>` next to
+/// project.json (shared by the window and `rivet mcp`).
+pub fn mock_dir(project_path: Option<&Path>, collection_id: &str) -> PathBuf {
+    project_path
+        .and_then(|p| p.parent().map(|d| d.join("mocks")))
+        .unwrap_or_else(|| std::env::temp_dir().join("rivet-mocks"))
+        .join(collection_id)
+}
+
+pub fn run_args(settings: &MockSettings, collection_id: &str, name: &str, dir: &Path, port: u16) -> Vec<String> {
     let engine = settings.engine;
+    let engine_id = serde_json::to_value(engine).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
     vec![
         "run".into(),
         "-d".into(),
         "--rm".into(),
         "--name".into(),
         name.into(),
+        "--label".into(),
+        format!("{LABEL_COLLECTION}={collection_id}"),
+        "--label".into(),
+        format!("{LABEL_PORT}={port}"),
+        "--label".into(),
+        format!("{LABEL_ENGINE}={engine_id}"),
+        "--label".into(),
+        format!("{LABEL_DIR}={}", dir.display()),
         "-p".into(),
         format!("127.0.0.1:{port}:{}", engine.container_port()),
         "-v".into(),
@@ -439,7 +463,7 @@ pub fn start(
     let name = container_name(&c.id);
     // A container left over from a crash would hold the name.
     let _ = run(docker, &["rm".into(), "-f".into(), name.clone()], std::time::Duration::from_secs(20));
-    let ran = run(docker, &run_args(settings, &name, dir, port), std::time::Duration::from_secs(600))?;
+    let ran = run(docker, &run_args(settings, &c.id, &name, dir, port), std::time::Duration::from_secs(600))?;
     if !ran.ok {
         let reason = first_line(&ran.stderr).unwrap_or("неизвестная ошибка");
         return Err(format!("Docker не запустил мок: {reason}"));
@@ -450,6 +474,40 @@ pub fn start(
         return Err(format!("{} не ответил на {url} за минуту", engine.label()));
     }
     Ok(MockRun { engine, container: name, port, url, dir: dir.to_path_buf(), coverage })
+}
+
+/// Mocks running in Docker (started by the window or by `rivet mcp`), by
+/// collection id. Coverage is unknown here (empty).
+pub fn running_mocks(docker: &Path) -> Result<Vec<(String, MockRun)>, String> {
+    let format = format!(
+        "{{{{.Names}}}}\t{{{{.Label \"{LABEL_COLLECTION}\"}}}}\t{{{{.Label \"{LABEL_PORT}\"}}}}\t{{{{.Label \"{LABEL_ENGINE}\"}}}}\t{{{{.Label \"{LABEL_DIR}\"}}}}"
+    );
+    let args = ["ps".to_string(), "--filter".into(), format!("label={LABEL_COLLECTION}"), "--format".into(), format];
+    let ran = run(docker, &args, std::time::Duration::from_secs(15))?;
+    if !ran.ok {
+        return Err(first_line(&ran.stderr).unwrap_or("docker ps не сработал").to_string());
+    }
+    Ok(ran
+        .stdout
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split('\t');
+            let (name, id, port, engine, dir) = (f.next()?, f.next()?, f.next()?, f.next()?, f.next()?);
+            let port: u16 = port.parse().ok()?;
+            let engine: MockEngine = serde_json::from_value(json!(engine)).unwrap_or_default();
+            Some((
+                id.to_string(),
+                MockRun {
+                    engine,
+                    container: name.to_string(),
+                    port,
+                    url: format!("http://127.0.0.1:{port}"),
+                    dir: PathBuf::from(dir),
+                    coverage: MockCoverage::default(),
+                },
+            ))
+        })
+        .collect())
 }
 
 /// Rewrites the stubs of a running mock from `c` and reloads them (no restart).
@@ -550,14 +608,18 @@ mod tests {
     fn docker_arguments() {
         let s = MockSettings::default();
         assert_eq!(s.image(), "wiremock/wiremock:3.9.1");
-        let args = run_args(&s, "rivet-mock-abc", Path::new("/data/mocks/abc"), 8090);
+        let args = run_args(&s, "c1", "rivet-mock-abc", Path::new("/data/mocks/abc"), 8090);
         assert_eq!(
             args,
             [
-                "run", "-d", "--rm", "--name", "rivet-mock-abc", "-p", "127.0.0.1:8090:8080", "-v",
+                "run", "-d", "--rm", "--name", "rivet-mock-abc",
+                "--label", "rivet.collection=c1", "--label", "rivet.port=8090",
+                "--label", "rivet.engine=wiremock", "--label", "rivet.dir=/data/mocks/abc",
+                "-p", "127.0.0.1:8090:8080", "-v",
                 "/data/mocks/abc:/home/wiremock", "wiremock/wiremock:3.9.1", "--disable-banner"
             ]
         );
+        assert_eq!(mock_dir(Some(Path::new("/p/project.json")), "c1"), Path::new("/p/mocks/c1"));
         let custom = MockSettings { image: " wiremock/wiremock:latest ".into(), ..MockSettings::default() };
         assert_eq!(custom.image(), "wiremock/wiremock:latest");
         assert_eq!(container_name("1f2e-3d4c-5b6a-7980-xyz"), "rivet-mock-1f2e3d4c5b6a");

@@ -26,12 +26,7 @@ impl Workspace {
 
     /// Folder with the engine's files for a collection (next to project.json).
     fn mock_dir(&self, collection_id: &str) -> PathBuf {
-        let base = self
-            .store_path
-            .as_ref()
-            .and_then(|p| p.parent().map(|d| d.join("mocks")))
-            .unwrap_or_else(|| std::env::temp_dir().join("rivet-mocks"));
-        base.join(collection_id)
+        mock::mock_dir(self.store_path.as_deref(), collection_id)
     }
 
     /// OpenAPI spec the collection's requests are linked to (answers requests
