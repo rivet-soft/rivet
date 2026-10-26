@@ -108,7 +108,8 @@ fn request_props() -> serde_json::Map<String, Value> {
         "description": {"type": "string", "description": "Documentation of the request (Markdown), shown in its Docs tab"},
         "path_variables": kv("Values of `:name` path segments of the URL (Postman Path Variables), e.g. {\"id\": \"42\"} for /users/:id"),
         "request_timeout_ms": {"type": ["integer", "null"], "minimum": 1, "description": "Timeout stored with the request (null = the app's)"},
-        "ssl_verify": {"type": ["boolean", "null"], "description": "Verify TLS certificates for this request (null = the app's setting)"}
+        "ssl_verify": {"type": ["boolean", "null"], "description": "Verify TLS certificates for this request (null = the app's setting)"},
+        "disabled_auto_headers": {"type": "array", "items": {"type": "string"}, "description": "Auto-generated headers not to send (replaces the list): user-agent, accept, accept-encoding, content-type, authorization (or the API-key header name). Host and Content-Length are always sent; [] turns all back on"}
     });
     props.as_object().cloned().unwrap_or_default()
 }

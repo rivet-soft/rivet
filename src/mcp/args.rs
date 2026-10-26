@@ -217,6 +217,14 @@ pub fn apply_request_fields(request: &mut RequestSpec, args: &Args) -> Result<()
     if args.0.contains_key("ssl_verify") {
         request.ssl_verify = args.bool("ssl_verify")?;
     }
+    if let Some(v) = args.0.get("disabled_auto_headers") {
+        let names = v.as_array().ok_or("disabled_auto_headers: expected an array of header names")?;
+        request.disabled_auto_headers.clear();
+        for name in names {
+            let name = name.as_str().ok_or("disabled_auto_headers: expected header names")?;
+            crate::core::auto_headers::set_enabled(request, name.trim(), false);
+        }
+    }
     Ok(())
 }
 
@@ -259,6 +267,13 @@ mod tests {
         let mut again = RequestSpec::untitled();
         apply_request_fields(&mut again, &Args::new(&round)).unwrap();
         assert_eq!((again.body.clone(), again.auth.clone(), again.params.clone()), (r.body, r.auth, r.params));
+
+        let off = json!({"disabled_auto_headers": ["User-Agent", "authorization"]});
+        apply_request_fields(&mut again, &Args::new(&off)).unwrap();
+        assert_eq!(again.disabled_auto_headers, ["user-agent", "authorization"]);
+        apply_request_fields(&mut again, &Args::new(&json!({"disabled_auto_headers": []}))).unwrap();
+        assert!(again.disabled_auto_headers.is_empty());
+        assert!(apply_request_fields(&mut again, &Args::new(&json!({"disabled_auto_headers": "accept"}))).is_err());
 
         assert_eq!(body(&json!("plain")).unwrap().kind, BodyKind::Text);
         assert!(apply_request_fields(&mut again, &Args::new(&json!({"method": "FETCH"}))).is_err());
