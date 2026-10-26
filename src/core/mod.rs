@@ -22,6 +22,7 @@ pub mod schema_hover;
 pub mod script;
 pub mod secrets;
 pub mod store;
+pub mod tree_ops;
 pub mod types;
 pub mod update;
 pub mod vars;
