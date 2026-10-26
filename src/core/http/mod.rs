@@ -79,7 +79,97 @@ pub struct HttpSessions {
     inner: Arc<Mutex<HashMap<String, Jar>>>,
 }
 
+/// One stored cookie, for the cookie manager.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CookieInfo {
+    /// Jar: a collection id or [`UNSAVED_COOKIE_SCOPE`].
+    pub scope: String,
+    pub domain: String,
+    /// Set without a Domain attribute: sent to this exact host only.
+    pub host_only: bool,
+    pub path: String,
+    pub name: String,
+    pub value: String,
+    /// Unix seconds; `None` for a session cookie.
+    pub expires: Option<i64>,
+    pub secure: bool,
+    pub http_only: bool,
+}
+
 impl HttpSessions {
+    /// Unexpired cookies of every jar, by scope, domain, path and name.
+    pub fn cookies(&self) -> Vec<CookieInfo> {
+        let jars: Vec<(String, Jar)> = match self.inner.lock() {
+            Ok(sessions) => sessions.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for (scope, jar) in jars {
+            let Ok(store) = jar.lock() else { continue };
+            for c in store.iter_unexpired() {
+                let (domain, host_only) = match &c.domain {
+                    cookie_store::CookieDomain::HostOnly(d) => (d.clone(), true),
+                    cookie_store::CookieDomain::Suffix(d) => (d.clone(), false),
+                    _ => (String::new(), true),
+                };
+                out.push(CookieInfo {
+                    scope: scope.clone(),
+                    domain,
+                    host_only,
+                    path: String::from(&c.path),
+                    name: c.name().to_string(),
+                    value: c.value().to_string(),
+                    expires: match &c.expires {
+                        cookie_store::CookieExpiration::AtUtc(t) => Some(t.unix_timestamp()),
+                        _ => None,
+                    },
+                    secure: c.secure().unwrap_or(false),
+                    http_only: c.http_only().unwrap_or(false),
+                });
+            }
+        }
+        out.sort_by(|a, b| {
+            (&a.scope, &a.domain, &a.path, &a.name).cmp(&(&b.scope, &b.domain, &b.path, &b.name))
+        });
+        out
+    }
+
+    /// Deletes one cookie; returns whether it existed.
+    pub fn remove_cookie(&self, scope: &str, domain: &str, path: &str, name: &str) -> bool {
+        self.get(scope)
+            .lock()
+            .map(|mut store| store.remove(domain, path, name).is_some())
+            .unwrap_or(false)
+    }
+
+    /// Deletes every cookie of `domain` in `scope`.
+    pub fn clear_domain(&self, scope: &str, domain: &str) {
+        for c in self.cookies().into_iter().filter(|c| c.scope == scope && c.domain == domain) {
+            self.remove_cookie(scope, &c.domain, &c.path, &c.name);
+        }
+    }
+
+    /// Stores a cookie as if `url` had answered with `Set-Cookie: set_cookie`
+    /// (`name=value; Path=/; Domain=…; Max-Age=…`).
+    pub fn add_cookie(&self, scope: &str, url: &str, set_cookie: &str) -> Result<(), String> {
+        let url = url.trim();
+        let with_scheme = if url.contains("://") { url.to_string() } else { format!("https://{url}") };
+        let parsed = url::Url::parse(&with_scheme).map_err(|e| format!("Некорректный URL: {e}"))?;
+        if parsed.host_str().is_none_or(str::is_empty) {
+            return Err("В URL нет хоста".into());
+        }
+        let set_cookie = set_cookie.trim();
+        if !set_cookie.split(';').next().is_some_and(|nv| nv.contains('=') && !nv.trim_start().starts_with('=')) {
+            return Err("Ожидается name=value; атрибуты через «;»".into());
+        }
+        let jar = self.get(scope);
+        let mut store = jar.lock().map_err(|_| "Хранилище cookies недоступно".to_string())?;
+        store
+            .parse(set_cookie, &parsed)
+            .map(|_| ())
+            .map_err(|e| format!("Cookie не принят: {e}"))
+    }
+
     pub fn clear(&self, scope: &str) {
         if let Ok(mut sessions) = self.inner.lock() {
             sessions.remove(scope);
@@ -510,6 +600,30 @@ pub fn status_text(code: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookie_manager_lists_adds_and_removes() {
+        let sessions = HttpSessions::default();
+        assert!(sessions.cookies().is_empty());
+        sessions.add_cookie("col", "https://api.x.com/v1", "sid=abc; Path=/; HttpOnly; Secure").unwrap();
+        sessions.add_cookie("col", "api.x.com", "theme=dark; Domain=x.com; Max-Age=3600").unwrap();
+        sessions.add_cookie(UNSAVED_COOKIE_SCOPE, "http://localhost:8080/", "a=1").unwrap();
+        assert!(sessions.add_cookie("col", "https://h/", "novalue").is_err());
+        assert!(sessions.add_cookie("col", "::", "a=1").is_err());
+        let all = sessions.cookies();
+        assert_eq!(all.len(), 3);
+        let sid = all.iter().find(|c| c.name == "sid").unwrap();
+        assert_eq!((sid.domain.as_str(), sid.host_only, sid.path.as_str(), sid.value.as_str()), ("api.x.com", true, "/", "abc"));
+        assert!(sid.secure && sid.http_only && sid.expires.is_none());
+        let theme = all.iter().find(|c| c.name == "theme").unwrap();
+        assert_eq!((theme.domain.as_str(), theme.host_only), ("x.com", false));
+        assert!(theme.expires.is_some());
+        assert!(sessions.remove_cookie("col", "api.x.com", "/", "sid"));
+        assert!(!sessions.remove_cookie("col", "api.x.com", "/", "sid"));
+        sessions.clear_domain("col", "x.com");
+        assert_eq!(sessions.cookies().len(), 1);
+        assert_eq!(sessions.cookies()[0].scope, UNSAVED_COOKIE_SCOPE);
+    }
 
     #[test]
     fn formats() {
