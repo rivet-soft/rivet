@@ -1,4 +1,5 @@
 use gpui_kit::component::input::Input;
+use crate::core::tree_ops::{self, Clip, ClipItem};
 use gpui_kit::*;
 
 use super::collection_dialog::DialogMode;
@@ -52,6 +53,84 @@ impl Workspace {
     ) {
         self.collection_menu = None;
         match (target, action) {
+            (target, "copy" | "cut") => {
+                let item = match target {
+                    SidebarMenu::Request(request_id) => self
+                        .project
+                        .collections
+                        .iter()
+                        .find(|c| c.requests.iter().any(|r| r.id == request_id))
+                        .map(|c| ClipItem::Request { collection_id: c.id.clone(), request_id }),
+                    SidebarMenu::Folder(collection_id, path) => {
+                        Some(ClipItem::Folder { collection_id, path })
+                    }
+                    SidebarMenu::Collection(_) => None,
+                };
+                if let Some(item) = item {
+                    let cut = action == "cut";
+                    self.sidebar_clip = Some(Clip { item, cut });
+                    self.notify_user(
+                        if cut {
+                            "Вырезано: «Вставить» в меню папки или коллекции перенесёт"
+                        } else {
+                            "Скопировано: «Вставить» в меню папки или коллекции"
+                        },
+                        cx,
+                    );
+                }
+            }
+            (SidebarMenu::Collection(id), "paste") => self.paste_into(&id, None, window, cx),
+            (SidebarMenu::Folder(id, folder), "paste") => {
+                self.paste_into(&id, Some(&folder), window, cx)
+            }
+            (SidebarMenu::Request(id), "duplicate") => {
+                let new = self
+                    .project
+                    .collections
+                    .iter_mut()
+                    .find(|c| c.requests.iter().any(|r| r.id == id))
+                    .and_then(|c| {
+                        let new_id = tree_ops::duplicate_request(c, &id)?;
+                        c.requests.iter().find(|r| r.id == new_id).cloned()
+                    });
+                if let Some(request) = new {
+                    self.sync_collection_panel(window, cx);
+                    self.schedule_save(cx);
+                    self.notify_user(format!("Создан «{}»", request.name), cx);
+                    self.open_request(request, window, cx);
+                }
+            }
+            (SidebarMenu::Folder(id, folder), "duplicate") => {
+                let path = self
+                    .project
+                    .collections
+                    .iter_mut()
+                    .find(|c| c.id == id)
+                    .and_then(|c| tree_ops::duplicate_folder(c, &folder));
+                if let Some(path) = path {
+                    self.sync_collection_panel(window, cx);
+                    self.schedule_save(cx);
+                    self.notify_user(format!("Создана папка «{path}»"), cx);
+                }
+            }
+            (SidebarMenu::Collection(id), "duplicate") => {
+                if let Some(copy) = tree_ops::duplicate_collection(&self.project, &id) {
+                    let name = copy.name.clone();
+                    let at = self
+                        .project
+                        .collections
+                        .iter()
+                        .position(|c| c.id == id)
+                        .map_or(self.project.collections.len(), |i| i + 1);
+                    if let Some(spec) = self.linked_specs.get(&id).cloned() {
+                        self.linked_specs.insert(copy.id.clone(), spec);
+                    }
+                    self.project.collections.insert(at, copy);
+                    self.sync_collection_panel(window, cx);
+                    self.schedule_save(cx);
+                    self.notify_user(format!("Создана коллекция «{name}»"), cx);
+                }
+            }
             (SidebarMenu::Collection(id), export) if export.starts_with("export-") => {
                 if let Some(format) =
                     crate::core::export::ExportFormat::from_id(&export["export-".len()..])
@@ -178,6 +257,45 @@ impl Workspace {
         cx.notify();
     }
 
+    /// "Вставить": pastes the sidebar clipboard into a collection root or
+    /// folder. Moved requests keep their open tabs in sync.
+    fn paste_into(
+        &mut self,
+        collection_id: &str,
+        folder: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(clip) = self.sidebar_clip.clone() else { return };
+        match tree_ops::paste(&mut self.project, &clip, collection_id, folder) {
+            Ok(pasted) => {
+                for (request_id, collection_id, folder) in &pasted.moved {
+                    let stored = self
+                        .project
+                        .collections
+                        .iter()
+                        .flat_map(|c| &c.requests)
+                        .find(|r| &r.id == request_id)
+                        .map(|r| r.spec_ref.clone());
+                    for tab in self.tabs.iter_mut().filter(|t| &t.request.id == request_id) {
+                        tab.request.collection_id = Some(collection_id.clone());
+                        tab.request.folder = folder.clone();
+                        if let Some(spec_ref) = stored.clone() {
+                            tab.request.spec_ref = spec_ref;
+                        }
+                    }
+                }
+                if clip.cut {
+                    self.sidebar_clip = None;
+                }
+                self.sync_collection_panel(window, cx);
+                self.schedule_save(cx);
+                self.notify_user(pasted.message, cx);
+            }
+            Err(e) => self.notify_user(e, cx),
+        }
+    }
+
     fn sidebar_menu_popover(
         &self,
         target: SidebarMenu,
@@ -186,26 +304,49 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.collection_menu.as_ref() == Some(&target);
+        let paste = self.sidebar_clip.is_some();
         let rows: Vec<(&'static str, &'static str)> = match target {
-            SidebarMenu::Collection(_) => vec![
-                ("new-request", "Новый запрос"),
-                ("new-folder", "Новая папка"),
-                ("rename", "Переименовать"),
-                ("settings", "Настройки коллекции"),
-                ("export-rivet", "Экспорт: Rivet (без потерь)"),
-                ("export-postman", "Экспорт: Postman v2.1"),
-                ("export-openapi", "Экспорт: OpenAPI 3"),
-                ("delete", "Удалить коллекцию"),
-            ],
-            SidebarMenu::Folder(_, _) => vec![
-                ("new-request", "Новый запрос"),
-                ("new-folder", "Новая вложенная папка"),
-                ("rename", "Переименовать"),
-                ("delete", "Удалить папку"),
-            ],
-            SidebarMenu::Request(_) => {
-                vec![("rename", "Переименовать"), ("delete", "Удалить запрос")]
+            SidebarMenu::Collection(_) => {
+                let mut rows = vec![
+                    ("new-request", "Новый запрос"),
+                    ("new-folder", "Новая папка"),
+                    ("rename", "Переименовать"),
+                    ("duplicate", "Дублировать коллекцию"),
+                ];
+                if paste {
+                    rows.push(("paste", "Вставить"));
+                }
+                rows.extend([
+                    ("settings", "Настройки коллекции"),
+                    ("export-rivet", "Экспорт: Rivet (без потерь)"),
+                    ("export-postman", "Экспорт: Postman v2.1"),
+                    ("export-openapi", "Экспорт: OpenAPI 3"),
+                    ("delete", "Удалить коллекцию"),
+                ]);
+                rows
             }
+            SidebarMenu::Folder(_, _) => {
+                let mut rows = vec![
+                    ("new-request", "Новый запрос"),
+                    ("new-folder", "Новая вложенная папка"),
+                    ("rename", "Переименовать"),
+                    ("duplicate", "Дублировать"),
+                    ("copy", "Копировать"),
+                    ("cut", "Вырезать"),
+                ];
+                if paste {
+                    rows.push(("paste", "Вставить"));
+                }
+                rows.push(("delete", "Удалить папку"));
+                rows
+            }
+            SidebarMenu::Request(_) => vec![
+                ("rename", "Переименовать"),
+                ("duplicate", "Дублировать"),
+                ("copy", "Копировать"),
+                ("cut", "Вырезать"),
+                ("delete", "Удалить запрос"),
+            ],
         };
         let trigger = div()
             .id(format!("sidebar-menu-trigger-{id}"))
@@ -301,6 +442,7 @@ impl Workspace {
         self.sidebar_width.to_bits().hash(&mut h);
         self.filter.hash(&mut h);
         self.collection_menu.hash(&mut h);
+        self.sidebar_clip.hash(&mut h);
         self.collection_delete_confirm.hash(&mut h);
         let mut collapsed: Vec<&String> = self.collapsed.iter().collect();
         collapsed.sort();

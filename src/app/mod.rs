@@ -341,6 +341,8 @@ pub struct Workspace {
     pub new_tab_menu_open: bool,
     pub tab_menu: Option<usize>,
     collection_menu: Option<SidebarMenu>,
+    /// Sidebar clipboard: a copied or cut request/folder waiting for "Вставить".
+    sidebar_clip: Option<crate::core::tree_ops::Clip>,
     /// Collection id whose sidebar "Удалить коллекцию" confirmation is open.
     collection_delete_confirm: Option<String>,
     collection_dialog: Option<Entity<CollectionDialog>>,
@@ -574,6 +576,7 @@ impl Workspace {
             new_tab_menu_open: false,
             tab_menu: None,
             collection_menu: None,
+            sidebar_clip: None,
             collection_delete_confirm: None,
             collection_dialog: None,
             env_menu_open: false,

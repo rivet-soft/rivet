@@ -1529,3 +1529,55 @@ fn path_variables_are_substituted_when_sending(cx: &mut TestAppContext) {
         assert_eq!(v.tabs[0].request.path_vars, vec![KeyValue::new("id", "a b")]);
     });
 }
+
+#[gpui_kit::test]
+fn sidebar_duplicate_copy_cut_paste(cx: &mut TestAppContext) {
+    let mut p = project();
+    p.collections[0].folders = vec!["Orders".into()];
+    let mut list = rivet::core::RequestSpec::new("List", Method::Get, "{{baseUrl}}/orders");
+    list.collection_id = Some(p.collections[0].id.clone());
+    p.collections[0].requests.push(list.clone());
+    p.open_tabs = vec![list.clone()];
+    p.active_tab = Some(0);
+    let (view, window) = open_with(cx, p);
+    let menu = |w: &mut gpui_kit::Window, cx: &mut gpui_kit::App, trigger: &str, action: &str| {
+        w.click(format!("sidebar-menu-trigger-{trigger}"), cx);
+        w.render_frame(cx);
+        w.click(format!("sidebar-action-{trigger}-{action}"), cx);
+        w.render_frame(cx);
+    };
+
+    // Duplicate the request: the copy opens.
+    window.update(|w, cx| menu(w, cx, "request-0-0", "duplicate"));
+    view.read_with(window, |v, _| {
+        let c = &v.project.collections[0];
+        assert_eq!(c.requests.len(), 2);
+        assert_eq!(c.requests[1].name, "List (копия)");
+        assert_eq!(v.active().unwrap().id, c.requests[1].id);
+    });
+
+    // Cut the original, paste into the folder: the open tab follows.
+    window.update(|w, cx| menu(w, cx, "request-0-0", "cut"));
+    window.update(|w, cx| menu(w, cx, "folder-0-0", "paste"));
+    view.read_with(window, |v, _| {
+        let moved = v.project.collections[0].requests.iter().find(|r| r.id == list.id).unwrap();
+        assert_eq!(moved.folder.as_deref(), Some("Orders"));
+        assert_eq!(v.tabs[0].request.folder.as_deref(), Some("Orders"));
+        assert_eq!(v.notice.as_deref(), Some("Запрос «List» перемещён"));
+    });
+
+    // Duplicate the collection, then copy the folder into the copy.
+    window.update(|w, cx| menu(w, cx, "collection-0", "duplicate"));
+    view.read_with(window, |v, _| {
+        assert_eq!(v.project.collections.len(), 2);
+        assert_eq!(v.project.collections[1].name, "Мои запросы (копия)");
+        assert_eq!(v.project.collections[1].requests.len(), 2);
+    });
+    window.update(|w, cx| menu(w, cx, "folder-0-0", "copy"));
+    window.update(|w, cx| menu(w, cx, "collection-1", "paste"));
+    view.read_with(window, |v, _| {
+        let copy = &v.project.collections[1];
+        assert!(copy.folders.contains(&"Orders (копия)".to_string()), "{:?}", copy.folders);
+        assert_eq!(copy.requests.iter().filter(|r| r.folder.as_deref() == Some("Orders (копия)")).count(), 1);
+    });
+}
