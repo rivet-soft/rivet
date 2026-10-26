@@ -5,7 +5,7 @@
 //! [`RequestSpec`] into a ready-to-send [`ResolvedRequest`].
 
 use super::header_check;
-use super::types::{Auth, BodyKind, Environment, RequestSpec, ResolvedRequest, SendError};
+use super::types::{Auth, BodyKind, Environment, KeyValue, RequestSpec, ResolvedRequest, SendError};
 
 /// Iterates `{{ ... }}` placeholders: yields `(start, end, trimmed_name)` byte ranges
 /// (the range covers the braces). Empty names are skipped.
@@ -46,6 +46,70 @@ pub fn mask_placeholders(text: &str, with: &str) -> String {
     }
     out.push_str(&text[last..]);
     out
+}
+
+/// Names of `:name` path segments in `url` (Postman path variables), unique,
+/// in order. Only whole segments of the path count: `/users/:id/posts`, not a
+/// port (`host:8080`), the query or the fragment.
+pub fn path_variable_names(url: &str) -> Vec<String> {
+    let base = url.split(['?', '#']).next().unwrap_or("");
+    let path = match base.split_once("://") {
+        Some((_, rest)) => rest.split_once('/').map_or("", |(_, p)| p),
+        None => base,
+    };
+    let mut names = Vec::new();
+    for segment in path.split('/') {
+        if let Some(name) = segment.strip_prefix(':') {
+            if !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                push_unique(&mut names, name);
+            }
+        }
+    }
+    names
+}
+
+/// Path variable rows for `url`: one per `:name`, keeping values and
+/// descriptions of `previous` rows with the same name.
+pub fn sync_path_vars(url: &str, previous: &[KeyValue]) -> Vec<KeyValue> {
+    path_variable_names(url)
+        .into_iter()
+        .map(|name| match previous.iter().find(|kv| kv.key == name) {
+            Some(kv) => kv.clone(),
+            None => KeyValue::new(name, ""),
+        })
+        .collect()
+}
+
+/// Replaces `:name` path segments with their (percent-encoded) values; a
+/// variable without a value stays as `:name`, as Postman sends it.
+fn apply_path_vars(url: &str, values: &[(String, String)]) -> String {
+    if values.is_empty() {
+        return url.to_string();
+    }
+    let (base, tail) = match url.find(['?', '#']) {
+        Some(i) => (&url[..i], &url[i..]),
+        None => (url, ""),
+    };
+    let (prefix, path) = match base.split_once("://") {
+        Some((scheme, rest)) => match rest.split_once('/') {
+            Some((host, path)) => (format!("{scheme}://{host}/"), path),
+            None => (base.to_string(), ""),
+        },
+        None => (String::new(), base),
+    };
+    let path: Vec<String> = path
+        .split('/')
+        .map(|segment| {
+            segment
+                .strip_prefix(':')
+                .and_then(|name| values.iter().find(|(k, _)| k == name))
+                .filter(|(_, v)| !v.is_empty())
+                .map_or_else(|| segment.to_string(), |(_, v)| encode_component(v, false))
+        })
+        .collect();
+    format!("{prefix}{}{tail}", path.join("/"))
 }
 
 /// First header HTTP can't carry, as [`SendError::InvalidHeader`]. A value that
@@ -387,6 +451,13 @@ pub fn resolve(req: &RequestSpec, env: Option<&Environment>) -> Result<ResolvedR
     };
 
     // `{{baseUrl}}/x` without baseUrl: name the template, not the bare "/x".
+    let path_values: Vec<(String, String)> = req
+        .path_vars
+        .iter()
+        .filter(|kv| kv.enabled && !kv.key.is_empty())
+        .map(|kv| (kv.key.clone(), sub(&kv.value)))
+        .collect();
+    let raw_url = apply_path_vars(&raw_url, &path_values);
     let mut url = normalize_url(&raw_url).map_err(|e| match e {
         SendError::InvalidUrl(_) if !url_missing.is_empty() => SendError::InvalidUrl(req.url.clone()),
         other => other,
@@ -671,6 +742,26 @@ mod tests {
         // The URL error names the template when a variable emptied it.
         let r = RequestSpec::new("x", Method::Get, "{{base}}/x");
         assert_eq!(resolve(&r, None).unwrap_err(), SendError::InvalidUrl("{{base}}/x".into()));
+    }
+
+    #[test]
+    fn path_variables() {
+        assert_eq!(path_variable_names("{{baseUrl}}/users/:id/posts/:post_id?x=:q#:f"), ["id", "post_id"]);
+        assert_eq!(path_variable_names("http://localhost:8080/:a/:a/:/x:y"), ["a"]);
+        assert!(path_variable_names("https://h:9/x").is_empty());
+        let old = vec![KeyValue::new("id", "7").description("user"), KeyValue::new("gone", "1")];
+        let synced = sync_path_vars("/u/:id/:new", &old);
+        assert_eq!(synced, vec![KeyValue::new("id", "7").description("user"), KeyValue::new("new", "")]);
+
+        let mut r = RequestSpec::new("x", Method::Get, "{{baseUrl}}/users/:id/files/:name?:id=1");
+        r.path_vars = vec![KeyValue::new("id", "{{uid}}"), KeyValue::new("name", "a b/c")];
+        let mut e = env();
+        e.vars.push(KeyValue::new("uid", "42"));
+        let res = resolve(&r, Some(&e)).unwrap();
+        assert_eq!(res.url, "http://localhost:8080/users/42/files/a%20b%2Fc?:id=1");
+        // No value (or disabled): sent as `:name`, like Postman.
+        r.path_vars = vec![KeyValue::new("id", ""), KeyValue::new("name", "n").enabled(false)];
+        assert_eq!(resolve(&r, Some(&e)).unwrap().url, "http://localhost:8080/users/:id/files/:name?:id=1");
     }
 
     #[test]

@@ -198,6 +198,9 @@ fn pm_url(request: &RequestSpec) -> Value {
     if !query.is_empty() {
         url["query"] = Value::Array(query);
     }
+    if !request.path_vars.is_empty() {
+        url["variable"] = Value::Array(request.path_vars.iter().map(pm_kv).collect());
+    }
     url
 }
 
@@ -545,7 +548,10 @@ pub fn to_openapi(collection: &Collection) -> (Value, Vec<String>) {
 
         let mut parameters: Vec<Value> = Vec::new();
         for name in &path_vars {
-            parameters.push(param(name, "path", None, &var_value(name)));
+            // `:id` takes its Path Variables row; `{{id}}` the collection variable.
+            let row = r.path_vars.iter().find(|kv| &kv.key == name);
+            let example = row.map_or_else(|| var_value(name), |kv| kv.value.clone());
+            parameters.push(param(name, "path", row, &example));
         }
         if let Some((_, q)) = r.url.split_once('?') {
             for pair in q.split('&').filter(|p| !p.is_empty()) {
@@ -717,6 +723,7 @@ mod tests {
         let mut login = RequestSpec::new("Login", Method::Post, "https://auth.example.com/login");
         login.body = Body { kind: BodyKind::Form, form: vec![KeyValue::new("user", "a"), KeyValue::new("pass", "b").enabled(false)], ..Body::default() };
         let mut upload = RequestSpec::new("Upload", Method::Put, "{{baseUrl}}/files/:name");
+        upload.path_vars = vec![KeyValue::new("name", "logo.png").description("file name")];
         let mut file = KeyValue::new("file", "/tmp/a.png");
         file.file = true;
         upload.body = Body { kind: BodyKind::Multipart, form: vec![file, KeyValue::new("note", "hi").description("caption")], ..Body::default() };
@@ -795,6 +802,8 @@ mod tests {
         assert_eq!(by_name("Login").url, "https://auth.example.com/login");
         assert_eq!(by_name("Upload").body, c.requests[4].body);
         assert_eq!(by_name("Upload").method, Method::Put);
+        assert_eq!(by_name("Upload").url, "{{baseUrl}}/files/:name");
+        assert_eq!(by_name("Upload").path_vars, c.requests[4].path_vars);
     }
 
     #[test]
@@ -842,6 +851,9 @@ mod tests {
         assert_eq!(create["example"], json!(c.requests[2].body.text));
         let upload = &doc["paths"]["/files/{name}"]["put"]["requestBody"]["content"]["multipart/form-data"]["schema"];
         assert_eq!(upload["properties"]["file"]["format"], "binary");
+        let name = &doc["paths"]["/files/{name}"]["put"]["parameters"][0];
+        assert_eq!(name["example"], "logo.png");
+        assert_eq!(name["description"], "file name");
         assert_eq!(upload["properties"]["note"]["description"], "caption");
         assert_eq!(doc["paths"]["/login"]["post"]["x-rivet-disabled-form-fields"][0]["key"], "pass");
         assert_eq!(doc["components"]["securitySchemes"]["basicAuth"], json!({"type": "http", "scheme": "basic"}));

@@ -181,6 +181,7 @@ fn same_request(a: &RequestSpec, b: &RequestSpec) -> bool {
         method,
         url,
         params,
+        path_vars,
         headers,
         body,
         auth,
@@ -198,6 +199,7 @@ fn same_request(a: &RequestSpec, b: &RequestSpec) -> bool {
         && *method == b.method
         && *url == b.url
         && *params == b.params
+        && *path_vars == b.path_vars
         && *headers == b.headers
         && *body == b.body
         && *auth == b.auth

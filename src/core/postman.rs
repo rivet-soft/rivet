@@ -205,22 +205,18 @@ fn parse_request(
         .map(str::to_string)
         .or_else(|| url_from_parts(url))?;
     let structured_query = key_values(url.get("query"), "key");
-    let mut raw = if structured_query.is_empty() {
+    let raw = if structured_query.is_empty() {
         raw
     } else {
         raw.split_once('?')
             .map_or(raw.clone(), |(base, _)| base.to_string())
     };
-    for variable in key_values(url.get("variable"), "key") {
-        let replacement = if variable.value.is_empty() {
-            format!("{{{{{}}}}}", variable.key)
-        } else {
-            variable.value
-        };
-        raw = raw.replace(&format!(":{}", variable.key), &replacement);
-    }
+    // `:name` segments stay in the URL; their values become Path Variables.
+    let declared = key_values(url.get("variable"), "key");
+    let path_vars = super::vars::sync_path_vars(&raw, &declared);
     let mut request = RequestSpec::new(name, method, raw);
     request.params = structured_query;
+    request.path_vars = path_vars;
     request.headers = key_values(req.get("header"), "key");
     request.auth = parse_auth(auth);
     if let Some(body) = req.get("body") {

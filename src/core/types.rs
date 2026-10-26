@@ -129,6 +129,10 @@ pub struct RequestSpec {
     pub url: String,
     #[serde(default)]
     pub params: Vec<KeyValue>,
+    /// Values of `:name` path segments of the URL (Postman's Path Variables),
+    /// in URL order; kept in sync with the URL by `vars::sync_path_vars`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_vars: Vec<KeyValue>,
     #[serde(default)]
     pub headers: Vec<KeyValue>,
     #[serde(default)]
@@ -202,6 +206,7 @@ impl RequestSpec {
             method,
             url: url.into(),
             params: Vec::new(),
+            path_vars: Vec::new(),
             headers: Vec::new(),
             body: Body::default(),
             auth: Auth::None,
