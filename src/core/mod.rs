@@ -2,6 +2,7 @@
 //! Submodules are owned by separate workstreams; see PLAN.md.
 
 pub mod bulk;
+pub mod codegen;
 pub mod collection_run;
 pub mod curl;
 pub mod export;
