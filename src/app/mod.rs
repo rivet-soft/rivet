@@ -6,6 +6,7 @@ pub mod browser;
 #[cfg(windows)]
 mod browser_win;
 mod collection_dialog;
+mod cookies;
 pub mod collection_panel;
 pub mod env_panel;
 pub mod history_panel;
@@ -365,6 +366,10 @@ pub struct Workspace {
     pub collection_panel: Entity<CollectionPanel>,
     pub settings_panel: Entity<SettingsPanel>,
     http_sessions: http::HttpSessions,
+    /// The cookie manager window is open.
+    pub cookies_open: bool,
+    cookie_url: Entity<InputState>,
+    cookie_value: Entity<InputState>,
     pub history_panel: Entity<HistoryPanel>,
     pub palette: Option<Entity<CommandPalette>>,
     /// Tab whose close is waiting for "save / don't save / cancel".
@@ -467,6 +472,10 @@ impl Workspace {
             state
         });
         let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Поиск запросов"));
+        let cookie_url = cx.new(|cx| InputState::new(window, cx).placeholder("https://api.example.com"));
+        let cookie_value = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("name=value; Path=/; Max-Age=3600")
+        });
         let ws_view = {
             let first = first.clone();
             cx.new(|cx| WsView::new(first, window, cx))
@@ -592,6 +601,9 @@ impl Workspace {
             collection_panel,
             settings_panel,
             http_sessions: http::HttpSessions::default(),
+            cookies_open: false,
+            cookie_url,
+            cookie_value,
             history_panel,
             palette: None,
             close_confirm: None,
@@ -1707,6 +1719,9 @@ impl Workspace {
         self.code_panel_open = !self.code_panel_open;
         if self.code_panel_open {
             self.sync_code_editor(window, cx);
+        } else {
+            // The snippet editor leaves the tree: keep shortcuts working.
+            window.focus(&self.focus, cx);
         }
         cx.notify();
     }
@@ -2898,6 +2913,7 @@ impl Render for Workspace {
             .child(self.render_status_bar(cx))
             .when_some(self.palette.clone(), |d, palette| d.child(palette))
             .when_some(self.close_confirm, |d, ix| d.child(self.render_close_confirm(ix, cx)))
+            .when(self.cookies_open, |d| d.child(self.render_cookie_manager(cx)))
             .when_some(self.collection_dialog.clone(), |d, dialog| d.child(dialog))
     }
 }

@@ -630,9 +630,10 @@ impl Workspace {
             .width(780.)
             .trigger(trigger)
             .child(div().id("code-panel").flex().h(px(397.)).child(langs).child(code).test_support())
-            .on_dismiss(move |_, cx| {
+            .on_dismiss(move |window, cx| {
                 view.update(cx, |this, cx| {
                     this.code_panel_open = false;
+                    window.focus(&this.focus, cx);
                     cx.notify();
                 })
                 .ok();
@@ -755,7 +756,24 @@ impl Workspace {
             .h(px(18.))
             .text_size(px(11.5))
             .child(location)
-            .child(div().flex_none().child(status))
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(14.))
+                    .child(status)
+                    .child(
+                        div()
+                            .id("cookies-open")
+                            .text_color(p.accent)
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .on_click(cx.listener(|this, _, window, cx| this.open_cookies(window, cx)))
+                            .child("Cookies")
+                            .test_support(),
+                    ),
+            )
             .test_support()
             .into_any_element()
     }

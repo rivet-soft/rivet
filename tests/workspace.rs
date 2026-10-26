@@ -1711,3 +1711,58 @@ fn har_files_import_as_collections(cx: &mut TestAppContext) {
     });
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[gpui_kit::test]
+fn cookie_manager_shows_deletes_and_adds_cookies(cx: &mut TestAppContext) {
+    use std::sync::{Arc, Mutex};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let sent_cookies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let log = sent_cookies.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let head = String::from_utf8_lossy(&buf[..n]).to_string();
+            let cookie = head
+                .lines()
+                .find_map(|l| l.strip_prefix("cookie: ").or_else(|| l.strip_prefix("Cookie: ")))
+                .unwrap_or("")
+                .to_string();
+            log.lock().unwrap().push(cookie);
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nSet-Cookie: sid=s1; Path=/; HttpOnly\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        }
+    });
+    let mut p = project();
+    p.open_tabs = vec![rivet::core::RequestSpec::new("C", Method::Get, format!("{base}/c"))];
+    p.active_tab = Some(0);
+    let (view, window) = open_with(cx, p);
+    window.update(|w, cx| w.press("cmd-enter", cx));
+    wait_sent(&view, window, 0);
+
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.click("cookies-open", cx);
+        w.render_frame(cx);
+        assert!(w.try_find("cookie-manager").is_some());
+        assert!(w.try_find(("cookie", 0usize)).is_some(), "sid from Set-Cookie");
+        w.click(("cookie-delete", 0usize), cx);
+        w.render_frame(cx);
+        assert!(w.try_find(("cookie", 0usize)).is_none());
+        // Add one by hand (the URL is prefilled with the request's origin).
+        w.click("cookie-value", cx);
+        w.input("token=t9; Path=/", cx);
+        w.click("cookie-add", cx);
+        w.render_frame(cx);
+        assert!(w.try_find(("cookie", 0usize)).is_some());
+        w.click("cookies-close", cx);
+        w.render_frame(cx);
+        assert!(w.try_find("cookie-manager").is_none());
+    });
+    view.read_with(window, |v, _| assert_eq!(v.notice.as_deref(), Some("Cookie добавлен")));
+    window.update(|w, cx| w.press("cmd-enter", cx));
+    wait_sent(&view, window, 0);
+    let log = sent_cookies.lock().unwrap().clone();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert_eq!(log[1], "token=t9", "deleted sid not sent, added token sent");
+}
