@@ -261,6 +261,166 @@ pub fn write_files(engine: MockEngine, c: &Collection, dir: &Path) -> Result<Vec
     }
 }
 
+// ---- running -------------------------------------------------------------------
+
+/// Whether mocks can run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DockerStatus {
+    /// No Docker CLI found.
+    Missing,
+    /// The CLI is there but the daemon doesn't answer (Docker Desktop not started).
+    NotRunning { docker: PathBuf, message: String },
+    Ready { docker: PathBuf, version: String },
+}
+
+impl DockerStatus {
+    pub fn docker(&self) -> Option<&Path> {
+        match self {
+            Self::Ready { docker, .. } => Some(docker),
+            _ => None,
+        }
+    }
+}
+
+/// Output of a finished command.
+struct Ran {
+    ok: bool,
+    stdout: String,
+    stderr: String,
+}
+
+/// Runs a command, giving up (and killing it) after `timeout`.
+fn run(program: &Path, args: &[String], timeout: std::time::Duration) -> Result<Ran, String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{}: {e}", program.display()))?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            child.stdout.take().map(|mut o| o.read_to_string(&mut stdout));
+            child.stderr.take().map(|mut e| e.read_to_string(&mut stderr));
+            return Ok(Ran { ok: status.success(), stdout, stderr });
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("{} не ответил за {} с", program.display(), timeout.as_secs()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Finds Docker and asks the daemon for its version.
+pub fn docker_status() -> DockerStatus {
+    let Some(docker) = find_docker() else { return DockerStatus::Missing };
+    let args = ["version".to_string(), "--format".into(), "{{.Server.Version}}".into()];
+    match run(&docker, &args, std::time::Duration::from_secs(8)) {
+        Ok(r) if r.ok && !r.stdout.trim().is_empty() => {
+            DockerStatus::Ready { docker, version: r.stdout.trim().to_string() }
+        }
+        Ok(r) => DockerStatus::NotRunning {
+            docker,
+            message: first_line(&r.stderr).unwrap_or("Docker не отвечает").to_string(),
+        },
+        Err(message) => DockerStatus::NotRunning { docker, message },
+    }
+}
+
+fn first_line(s: &str) -> Option<&str> {
+    s.lines().map(str::trim).find(|l| !l.is_empty())
+}
+
+/// First port from `from` that is not in `taken` and can be bound on 127.0.0.1.
+pub fn free_port(from: u16, taken: &[u16]) -> Option<u16> {
+    (from..=u16::MAX)
+        .take(200)
+        .find(|p| !taken.contains(p) && std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
+}
+
+/// A running mock.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MockRun {
+    pub engine: MockEngine,
+    pub container: String,
+    pub port: u16,
+    /// `http://127.0.0.1:<port>`.
+    pub url: String,
+    pub dir: PathBuf,
+    /// Requests the mock answers (those with examples).
+    pub answered: usize,
+    pub notes: Vec<String>,
+}
+
+fn http(method: super::types::Method, url: String, timeout_ms: u64) -> Result<u16, String> {
+    let req = super::types::ResolvedRequest { method, url, headers: Vec::new(), body: None, missing_vars: Vec::new() };
+    let settings = super::types::Settings { timeout_ms, follow_redirects: false, ..Default::default() };
+    super::http::execute(&req, &settings, &super::http::CancelToken::new())
+        .map(|r| r.status)
+        .map_err(|e| e.to_string())
+}
+
+/// Polls the engine's health endpoint until it answers 200.
+fn wait_healthy(engine: MockEngine, url: &str, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    let health = format!("{url}{}", engine.health_path());
+    while std::time::Instant::now() < deadline {
+        if http(super::types::Method::Get, health.clone(), 1500) == Ok(200) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    false
+}
+
+/// Starts collection `c`'s mock in Docker on `port`, serving files from `dir`.
+/// Blocking (the first start may pull the image): call off the UI thread.
+pub fn start(docker: &Path, settings: &MockSettings, c: &Collection, dir: &Path, port: u16) -> Result<MockRun, String> {
+    let engine = settings.engine;
+    let notes = write_files(engine, c, dir)?;
+    let name = container_name(&c.id);
+    // A container left over from a crash would hold the name.
+    let _ = run(docker, &["rm".into(), "-f".into(), name.clone()], std::time::Duration::from_secs(20));
+    let ran = run(docker, &run_args(settings, &name, dir, port), std::time::Duration::from_secs(600))?;
+    if !ran.ok {
+        let reason = first_line(&ran.stderr).unwrap_or("неизвестная ошибка");
+        return Err(format!("Docker не запустил мок: {reason}"));
+    }
+    let url = format!("http://127.0.0.1:{port}");
+    if !wait_healthy(engine, &url, std::time::Duration::from_secs(60)) {
+        let _ = run(docker, &["stop".into(), "-t".into(), "1".into(), name], std::time::Duration::from_secs(20));
+        return Err(format!("{} не ответил на {url} за минуту", engine.label()));
+    }
+    Ok(MockRun { engine, container: name, port, url, dir: dir.to_path_buf(), answered: answered_requests(c), notes })
+}
+
+/// Rewrites the stubs of a running mock from `c` and reloads them (no restart).
+pub fn reload(running: &MockRun, c: &Collection) -> Result<MockRun, String> {
+    let notes = write_files(running.engine, c, &running.dir)?;
+    let status = http(super::types::Method::Post, format!("{}{}", running.url, running.engine.reload_path()), 5000)?;
+    if !(200..300).contains(&status) {
+        return Err(format!("{} ответил {status} на перезагрузку заглушек", running.engine.label()));
+    }
+    Ok(MockRun { answered: answered_requests(c), notes, ..running.clone() })
+}
+
+/// Stops a mock (its container is removed: it was started with --rm).
+pub fn stop(docker: &Path, running: &MockRun) -> Result<(), String> {
+    let ran = run(docker, &["stop".into(), "-t".into(), "1".into(), running.container.clone()], std::time::Duration::from_secs(30))?;
+    if ran.ok || ran.stderr.contains("No such container") {
+        Ok(())
+    } else {
+        Err(first_line(&ran.stderr).unwrap_or("docker stop не сработал").to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +484,14 @@ mod tests {
         let parsed: MockSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed, MockSettings::default());
         assert_eq!(serde_json::to_value(MockEngine::WireMock).unwrap(), "wiremock");
+    }
+
+    #[test]
+    fn free_ports_skip_taken_and_bound() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy = held.local_addr().unwrap().port();
+        let port = free_port(busy, &[busy + 1]).unwrap();
+        assert!(port != busy && port != busy + 1, "{busy} → {port}");
     }
 
     #[test]
