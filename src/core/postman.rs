@@ -101,6 +101,13 @@ impl PostmanImport {
                             .and_then(Value::as_u64)
                             .map(|n| n as u32);
                         parsed.ssl_verify = behavior.get("strictSSL").and_then(Value::as_bool);
+                        if let Some(off) = behavior.get("disabledSystemHeaders").and_then(Value::as_object) {
+                            parsed.disabled_auto_headers = off
+                                .iter()
+                                .filter(|(_, v)| v.as_bool() == Some(true))
+                                .map(|(name, _)| name.to_ascii_lowercase())
+                                .collect();
+                        }
                     }
                     parsed.collection_id = Some(self.collection.id.clone());
                     parsed.folder = (!prefix.is_empty()).then(|| prefix.to_string());

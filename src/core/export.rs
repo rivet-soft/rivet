@@ -318,6 +318,11 @@ fn pm_item(request: &RequestSpec, warnings: &mut Vec<String>) -> Value {
     if let Some(verify) = request.ssl_verify {
         behavior.insert("strictSSL".into(), json!(verify));
     }
+    if !request.disabled_auto_headers.is_empty() {
+        let off: Map<String, Value> =
+            request.disabled_auto_headers.iter().map(|name| (name.clone(), json!(true))).collect();
+        behavior.insert("disabledSystemHeaders".into(), Value::Object(off));
+    }
     if !behavior.is_empty() {
         item["protocolProfileBehavior"] = Value::Object(behavior);
     }
@@ -744,6 +749,9 @@ pub fn to_openapi(collection: &Collection) -> (Value, Vec<String>) {
         if r.timeout_ms.is_some() || r.ssl_verify.is_some() {
             op["x-rivet-connection"] = json!({"timeout_ms": r.timeout_ms, "ssl_verify": r.ssl_verify});
         }
+        if !r.disabled_auto_headers.is_empty() {
+            op["x-rivet-disabled-auto-headers"] = json!(r.disabled_auto_headers);
+        }
         if body.kind == BodyKind::Binary {
             if let Some(p) = &body.file_path {
                 op["x-rivet-body-file"] = json!(p.display().to_string());
@@ -811,6 +819,7 @@ mod tests {
         list.max_redirects = Some(3);
         list.ssl_verify = Some(false);
         list.timeout_ms = Some(1500);
+        list.disabled_auto_headers = vec!["user-agent".into(), "authorization".into()];
         list.description = "Lists users.\n\n- paged".into();
         list.examples = vec![
             crate::core::types::Example {
@@ -888,7 +897,7 @@ mod tests {
         assert_eq!(doc["item"][0]["name"], "Users");
         assert_eq!(doc["item"][0]["item"][0]["name"], "Admin");
         assert_eq!(doc["item"][1]["name"], "Empty");
-        assert_eq!(doc["item"][0]["item"][1]["protocolProfileBehavior"], json!({"followRedirects": false, "maxRedirects": 3, "strictSSL": false}));
+        assert_eq!(doc["item"][0]["item"][1]["protocolProfileBehavior"], json!({"followRedirects": false, "maxRedirects": 3, "strictSSL": false, "disabledSystemHeaders": {"user-agent": true, "authorization": true}}));
 
         let imported = PostmanImport::parse(&out.text).unwrap().collection;
         assert_eq!(imported.name, "Shop API");
@@ -915,6 +924,7 @@ mod tests {
         assert_eq!(list.folder.as_deref(), Some("Users"));
         assert_eq!(list.follow_redirects, Some(false));
         assert_eq!(list.ssl_verify, Some(false));
+        assert_eq!(list.disabled_auto_headers, ["user-agent", "authorization"]);
         let strip = |e: &crate::core::types::Example| (e.name.clone(), e.status, e.status_text.clone(), e.headers.clone(), e.body.clone());
         assert_eq!(
             list.examples.iter().map(strip).collect::<Vec<_>>(),
@@ -973,6 +983,7 @@ mod tests {
         assert_eq!(list["security"], json!([{"bearerAuth": []}]));
         assert_eq!(list["x-rivet-redirects"], json!({"follow": false, "max": 3}));
         assert_eq!(list["x-rivet-connection"], json!({"timeout_ms": 1500, "ssl_verify": false}));
+        assert_eq!(list["x-rivet-disabled-auto-headers"], json!(["user-agent", "authorization"]));
         assert_eq!(list["responses"]["200"]["content"]["application/json"]["example"], json!([{"id": 1}, {"id": 2}]));
         assert_eq!(list["responses"]["401"]["content"]["text/plain"]["example"], "nope");
         assert_eq!(list["responses"]["401"]["description"], "Unauthorized");
