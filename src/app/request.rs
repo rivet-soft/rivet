@@ -521,7 +521,8 @@ impl Workspace {
                             IconName::Copy
                         })
                         .on_click(cx.listener(|this, _, _, cx| this.copy_curl(cx))),
-                    ),
+                    )
+                    .child(self.render_code_panel(cx)),
             )
             .when(!missing.is_empty(), |d| {
                 d.child(
@@ -541,6 +542,100 @@ impl Workspace {
                         )
                         .test_support(),
                 )
+            })
+            .into_any_element()
+    }
+
+    /// "Код": the request as a snippet in another language (Postman's Code panel).
+    fn render_code_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = *cx.palette();
+        let current = self.code_lang();
+        let view = cx.entity().downgrade();
+        let trigger = Button::new("code-snippet", "Код")
+            .icon(IconName::CodeXml)
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_code_panel(window, cx)));
+        if !self.code_panel_open {
+            return trigger.into_any_element();
+        }
+        let langs = div()
+            .id("code-langs")
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(190.))
+            .p(px(4.))
+            .gap(px(1.))
+            .border_r_1()
+            .border_color(p.border)
+            .children(crate::core::codegen::CodeLang::ALL.into_iter().enumerate().map(|(i, lang)| {
+                let selected = lang == current;
+                div()
+                    .id(("code-lang", i))
+                    .px(px(8.))
+                    .py(px(5.))
+                    .rounded(px(5.))
+                    .text_size(px(12.))
+                    .cursor_pointer()
+                    .text_color(if selected { p.text } else { p.text_dim })
+                    .when(selected, |d| d.bg(p.surface_hi))
+                    .hover(|s| s.bg(p.surface_hi))
+                    .on_click(cx.listener(move |this, _, window, cx| this.set_code_lang(lang, window, cx)))
+                    .child(lang.label())
+                    .test_support()
+            }));
+        let editor = if current.editor_language().is_some() {
+            &self.code_editor_js
+        } else {
+            &self.code_editor_plain
+        };
+        let code = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(36.))
+                    .px(px(10.))
+                    .border_b_1()
+                    .border_color(p.border)
+                    .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).child(current.label()))
+                    .child(
+                        Button::new("code-copy", "Копировать")
+                            .icon(IconName::Copy)
+                            .on_click(cx.listener(|this, _, _, cx| this.copy_code(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .id("code-editor")
+                    .h(px(360.))
+                    .child(
+                        gpui_kit::component::input::Editor::new(editor)
+                            .readonly(true)
+                            .appearance(false)
+                            .bordered(false)
+                            .font_family(MONO)
+                            .text_size(px(12.))
+                            .h(relative(1.)),
+                    )
+                    .test_support(),
+            );
+        Popover::new("code-popover")
+            .open(true)
+            .placement(Placement::BelowEnd)
+            .width(780.)
+            .trigger(trigger)
+            .child(div().id("code-panel").flex().h(px(397.)).child(langs).child(code).test_support())
+            .on_dismiss(move |_, cx| {
+                view.update(cx, |this, cx| {
+                    this.code_panel_open = false;
+                    cx.notify();
+                })
+                .ok();
             })
             .into_any_element()
     }

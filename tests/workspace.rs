@@ -1459,3 +1459,45 @@ fn save_state_shows_saved_modified_and_draft(cx: &mut TestAppContext) {
     });
     view.read_with(window, |v, _| assert_eq!(v.tab_save_state(1), Some(SaveState::Draft)));
 }
+
+#[gpui_kit::test]
+fn code_panel_renders_snippets_and_remembers_language(cx: &mut TestAppContext) {
+    let mut p = project();
+    let mut req = rivet::core::RequestSpec::new("Create", Method::Post, "{{baseUrl}}/orders");
+    req.body = rivet::core::Body::json("{\"qty\": 2}");
+    p.open_tabs = vec![req];
+    p.active_tab = Some(0);
+    let (view, window) = open_with(cx, p);
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("code-panel").is_none());
+        w.click("code-snippet", cx);
+        w.render_frame(cx);
+        assert!(w.try_find("code-panel").is_some());
+        assert!(w.try_find(("code-lang", 11usize)).is_some());
+    });
+    view.read_with(window, |v, _| {
+        assert_eq!(v.code_lang(), rivet::core::codegen::CodeLang::Curl);
+        let code = v.code_snippet().unwrap();
+        assert!(code.starts_with("curl -X POST 'https://dev.shop.local/api/orders'"), "{code}");
+    });
+    // Python: language persisted in the project settings.
+    window.update(|w, cx| {
+        w.click(("code-lang", 3usize), cx);
+        w.render_frame(cx);
+        w.click("code-copy", cx);
+    });
+    let copied = window.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text())).unwrap();
+    assert!(copied.contains("import requests"), "{copied}");
+    assert!(copied.contains("\"https://dev.shop.local/api/orders\""), "{copied}");
+    view.read_with(window, |v, _| {
+        assert_eq!(v.project.settings.code_language.as_deref(), Some("python-requests"));
+        assert_eq!(v.notice.as_deref(), Some("Код скопирован: Python · requests"));
+    });
+    // Toggling closes it.
+    window.update(|w, cx| {
+        w.click("code-snippet", cx);
+        w.render_frame(cx);
+        assert!(w.try_find("code-panel").is_none());
+    });
+}

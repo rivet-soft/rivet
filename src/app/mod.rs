@@ -327,6 +327,14 @@ pub struct Workspace {
     /// Lower-cased sidebar filter, cached from `filter_input`.
     pub filter: String,
     pub method_menu_open: bool,
+    /// The request "Код" panel (snippets in other languages) is open.
+    pub code_panel_open: bool,
+    /// Snippet editors: JavaScript highlighting or plain text (an editor's
+    /// language is fixed at creation).
+    code_editor_js: Entity<gpui_kit::component::input::EditorState>,
+    code_editor_plain: Entity<gpui_kit::component::input::EditorState>,
+    /// Text last pushed into the snippet editor.
+    code_text: String,
     /// "+" in the tab bar: HTTP request / WebSocket.
     pub new_tab_menu_open: bool,
     pub tab_menu: Option<usize>,
@@ -432,6 +440,14 @@ impl Workspace {
         let active_tab = Some(project.active_tab.unwrap_or(0).min(tabs.len() - 1));
         let first = tabs[active_tab.unwrap()].request.clone();
 
+        let code_editor_js = cx.new(|cx| {
+            gpui_kit::component::input::EditorState::new(window, cx)
+                .language("javascript")
+                .line_number(true)
+        });
+        let code_editor_plain = cx.new(|cx| {
+            gpui_kit::component::input::EditorState::new(window, cx).line_number(true)
+        });
         let url_input = cx.new(|cx| {
             let mut state =
                 InputState::new(window, cx).placeholder("Введите URL или вставьте cURL");
@@ -549,6 +565,10 @@ impl Workspace {
             filter_input,
             filter: String::new(),
             method_menu_open: false,
+            code_panel_open: false,
+            code_editor_js,
+            code_editor_plain,
+            code_text: String::new(),
             new_tab_menu_open: false,
             tab_menu: None,
             collection_menu: None,
@@ -1557,6 +1577,77 @@ impl Workspace {
         }
     }
 
+    /// Language of the "Код" panel (saved in the project settings).
+    pub fn code_lang(&self) -> crate::core::codegen::CodeLang {
+        self.project
+            .settings
+            .code_language
+            .as_deref()
+            .and_then(crate::core::codegen::CodeLang::from_id)
+            .unwrap_or(crate::core::codegen::CodeLang::Curl)
+    }
+
+    /// The active request as a snippet in the panel's language.
+    pub fn code_snippet(&self) -> Result<String, String> {
+        let request = self.active().ok_or("Нет активного запроса")?;
+        let env = self.request_env(request);
+        let resolved = vars::resolve(request, env.as_ref()).map_err(|e| e.to_string())?;
+        Ok(crate::core::codegen::generate(self.code_lang(), request, &resolved, env.as_ref()))
+    }
+
+    pub fn toggle_code_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.code_panel_open = !self.code_panel_open;
+        if self.code_panel_open {
+            self.sync_code_editor(window, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn set_code_lang(
+        &mut self,
+        lang: crate::core::codegen::CodeLang,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.code_lang() != lang {
+            self.project.settings.code_language = Some(lang.id().to_string());
+            self.schedule_save(cx);
+        }
+        self.sync_code_editor(window, cx);
+        cx.notify();
+    }
+
+    /// Snippet editor for the current language.
+    fn code_editor(&self) -> &Entity<gpui_kit::component::input::EditorState> {
+        if self.code_lang().editor_language().is_some() {
+            &self.code_editor_js
+        } else {
+            &self.code_editor_plain
+        }
+    }
+
+    /// Regenerates the snippet; runs only while the panel is open, and touches
+    /// the editor only when the text changed.
+    fn sync_code_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.code_snippet().unwrap_or_else(|e| format!("// {e}"));
+        if text != self.code_text {
+            self.code_text = text.clone();
+            self.code_editor()
+                .clone()
+                .update(cx, |s, cx| s.set_value(text, window, cx));
+        }
+    }
+
+    pub fn copy_code(&mut self, cx: &mut Context<Self>) {
+        match self.code_snippet() {
+            Ok(code) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(code));
+                self.notify_user(format!("Код скопирован: {}", self.code_lang().label()), cx);
+            }
+            Err(e) => self.notify_user(format!("Не удалось: {e}"), cx),
+        }
+    }
+
     pub fn copy_curl(&mut self, cx: &mut Context<Self>) {
         let Some(request) = self.active() else { return };
         let env = self.request_env(request);
@@ -2481,6 +2572,9 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if window.focused(cx).is_none() {
             window.focus(&self.focus, cx);
+        }
+        if self.code_panel_open {
+            self.sync_code_editor(window, cx);
         }
         let sidebar_key = self.sidebar_key(cx);
         if self.sidebar_key != Some(sidebar_key) {

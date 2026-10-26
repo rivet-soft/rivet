@@ -354,6 +354,9 @@ pub struct Settings {
     /// Release the user chose to skip ("Пропустить эту версию"), e.g. `1.4.0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped_version: Option<String>,
+    /// Last language picked in the request "Код" panel (`CodeLang::id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_language: Option<String>,
 }
 
 /// Permissions of the MCP server (`rivet mcp`), edited in Settings → MCP and
@@ -413,6 +416,7 @@ impl Default for Settings {
             mcp: McpSettings::default(),
             auto_update: true,
             skipped_version: None,
+            code_language: None,
         }
     }
 }
