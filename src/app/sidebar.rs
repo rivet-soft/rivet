@@ -476,6 +476,9 @@ impl Workspace {
             .flex_col()
             .flex_none()
             .w(px(width))
+            // The sidebar is a cached view laid out as a root: without a
+            // definite height it grows to its content and the tree never scrolls.
+            .h_full()
             .bg(p.surface)
     }
 

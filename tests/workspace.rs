@@ -1766,3 +1766,41 @@ fn cookie_manager_shows_deletes_and_adds_cookies(cx: &mut TestAppContext) {
     assert_eq!(log.len(), 2, "{log:?}");
     assert_eq!(log[1], "token=t9", "deleted sid not sent, added token sent");
 }
+
+/// Cached views (sidebar, request editor) are laid out as roots: their lists
+/// must still be height-bounded and scroll.
+#[gpui_kit::test]
+fn long_lists_scroll_in_cached_views(cx: &mut TestAppContext) {
+    use gpui_kit::ScrollDelta;
+    let mut p = project();
+    let mut big = Collection::new("Big");
+    for i in 0..120 {
+        let mut r = rivet::core::RequestSpec::new(format!("R{i}"), Method::Get, "http://h/");
+        r.collection_id = Some(big.id.clone());
+        big.requests.push(r);
+    }
+    p.collections = vec![big];
+    let mut many = rivet::core::RequestSpec::new("Many", Method::Get, "http://h/");
+    many.params = (0..80).map(|i| KeyValue::new(format!("p{i}"), "v")).collect();
+    p.open_tabs = vec![many];
+    p.active_tab = Some(0);
+    let (_, window) = open_with(cx, p);
+    window.update(|w, cx| w.render_frame(cx));
+    window.run_until_parked();
+
+    let y = |window: &mut VisualTestContext, id: (&'static str, usize)| {
+        window.update(|w, _| w.find(id).bounds().origin.y)
+    };
+    let before = y(window, ("saved", 5));
+    window.update(|w, cx| w.scroll(("saved", 5usize), ScrollDelta::Pixels(point(px(0.), px(-300.))), cx));
+    window.run_until_parked();
+    assert!(y(window, ("saved", 5)) < before, "collection tree scrolls");
+
+    let before = window.update(|w, _| w.within("req-params").find(("key", 3usize)).bounds().origin.y);
+    window.update(|w, cx| {
+        w.within("req-params").scroll(("key", 3usize), ScrollDelta::Pixels(point(px(0.), px(-200.))), cx)
+    });
+    window.run_until_parked();
+    let after = window.update(|w, _| w.within("req-params").find(("key", 3usize)).bounds().origin.y);
+    assert!(after < before, "params table scrolls: {before:?} → {after:?}");
+}
