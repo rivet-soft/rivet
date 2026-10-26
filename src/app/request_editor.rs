@@ -1665,6 +1665,7 @@ impl RequestEditor {
             return;
         };
         let len = target.list(&self.spec).len();
+        let mut rows_changed = false;
         if pos >= len {
             // The draft row: becomes real once it has content.
             if text.is_empty() {
@@ -1673,6 +1674,7 @@ impl RequestEditor {
             target.list_mut(&mut self.spec).push(KeyValue::new("", ""));
             let draft = self.make_row(target, None, window, cx);
             self.rows_mut(target).push(draft);
+            rows_changed = true;
         }
         let kv = &mut target.list_mut(&mut self.spec)[pos];
         let slot = match field {
@@ -1684,7 +1686,12 @@ impl RequestEditor {
             *slot = text;
             cx.emit(RequestEditorEvent::Changed);
         }
-        cx.notify();
+        // The cell redraws itself. The editor only needs to when something it
+        // draws depends on the text: new rows, tab counts (keys), header
+        // problem badges. Skipping it keeps typing a value cheap.
+        if rows_changed || field == Field::Key || target == KvTarget::Headers {
+            cx.notify();
+        }
     }
 
     /// Whether a value cell is open as the multi-line editor (tests).

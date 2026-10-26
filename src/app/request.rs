@@ -953,7 +953,9 @@ impl Workspace {
                     .flex_none()
                     .w(px(left_width))
                     .min_w(px(MIN_REQUEST_PANE_WIDTH))
-                    .child(self.editor.clone())
+                    // Cached: re-rendered only when the editor itself changes,
+                    // not on every workspace render (URL typing, toasts…).
+                    .child(self.editor.clone().cached(StyleRefinement::default().size_full()))
                     .test_support(),
             )
             .child(
@@ -971,7 +973,7 @@ impl Workspace {
                     .flex_col()
                     .flex_1()
                     .min_w(px(MIN_RESPONSE_PANE_WIDTH))
-                    .child(self.response.clone())
+                    .child(self.response.clone().cached(StyleRefinement::default().size_full()))
                     .test_support(),
             )
             .into_any_element()

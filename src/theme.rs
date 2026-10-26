@@ -102,6 +102,8 @@ impl Palette {
                 t.highlight_theme = std::sync::Arc::new(h);
             }
         });
+        // Cached views (sidebar, editor, response) must repaint in the new palette.
+        cx.refresh_windows();
     }
 
     /// Code editor colours (tree-sitter captures) matching `ui::CodeView`:
