@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use super::export;
 use super::openapi::Spec;
 use super::postman::{self, PostmanImport};
 use super::types::Collection;
@@ -10,7 +11,7 @@ use super::types::Collection;
 /// What [`import_file`] produced.
 pub struct ImportOutcome {
     pub collection: Collection,
-    /// "openapi" or "postman".
+    /// "openapi", "postman" or "rivet".
     pub format: &'static str,
     /// The parsed spec for OpenAPI imports (the collection is linked to the file).
     pub spec: Option<Spec>,
@@ -36,12 +37,26 @@ pub fn collection_from_spec(spec: &Spec, path: &Path) -> Collection {
     collection
 }
 
-/// Imports a Postman v2.x collection or an OpenAPI 3 / Swagger 2 file.
+/// Reads a native Rivet export (`*.rivet.json`). A collection linked to an
+/// OpenAPI file keeps the link only while that file still loads.
+pub fn rivet_collection(doc: &serde_json::Value) -> Result<(Collection, Option<Spec>), String> {
+    let mut collection = export::from_rivet(doc)?;
+    let spec = collection.source.as_deref().and_then(|p| Spec::load(p).ok());
+    if spec.is_none() {
+        collection.source = None;
+    }
+    Ok((collection, spec))
+}
+
+/// Imports a Rivet export, a Postman v2.x collection or an OpenAPI 3 / Swagger 2 file.
 pub fn import_file(path: &Path) -> Result<ImportOutcome, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let is_postman = serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .is_some_and(|doc| postman::is_postman(&doc));
+    let doc = serde_json::from_str::<serde_json::Value>(&text).ok();
+    if let Some(doc) = doc.as_ref().filter(|d| export::is_rivet(d)) {
+        let (collection, spec) = rivet_collection(doc)?;
+        return Ok(ImportOutcome { collection, format: "rivet", spec, warnings: Vec::new() });
+    }
+    let is_postman = doc.is_some_and(|doc| postman::is_postman(&doc));
     if is_postman {
         let mut imported = PostmanImport::parse(&text)?;
         imported.resolve_file_paths(path);

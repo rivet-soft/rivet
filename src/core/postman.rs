@@ -91,6 +91,14 @@ impl PostmanImport {
                     parse_request(req, name, auth, &mut self.unsupported_bodies)
                 {
                     parsed.scripts = parse_scripts(item.get("event"));
+                    if let Some(behavior) = item.get("protocolProfileBehavior") {
+                        parsed.follow_redirects =
+                            behavior.get("followRedirects").and_then(Value::as_bool);
+                        parsed.max_redirects = behavior
+                            .get("maxRedirects")
+                            .and_then(Value::as_u64)
+                            .map(|n| n as u32);
+                    }
                     parsed.collection_id = Some(self.collection.id.clone());
                     parsed.folder = (!prefix.is_empty()).then(|| prefix.to_string());
                     self.collection.requests.push(parsed);
@@ -267,12 +275,14 @@ fn parse_request(
                         } else {
                             entry.get("value").map(string).unwrap_or_default()
                         };
-                        let mut row = KeyValue::new(key, value).enabled(
-                            !entry
-                                .get("disabled")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false),
-                        );
+                        let mut row = KeyValue::new(key, value)
+                            .description(entry.get("description").map(description).unwrap_or_default())
+                            .enabled(
+                                !entry
+                                    .get("disabled")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false),
+                            );
                         row.file = file;
                         Some(row)
                     })

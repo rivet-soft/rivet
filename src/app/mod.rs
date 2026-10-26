@@ -1988,7 +1988,7 @@ impl Workspace {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Импортировать OpenAPI, Swagger или Postman".into()),
+            prompt: Some("Импортировать OpenAPI, Swagger, Postman или Rivet".into()),
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await {
@@ -2009,9 +2009,29 @@ impl Workspace {
                 return;
             }
         };
-        let is_postman = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .is_some_and(|doc| postman::is_postman(&doc));
+        let doc = serde_json::from_str::<serde_json::Value>(&text).ok();
+        if let Some(doc) = doc.as_ref().filter(|d| crate::core::export::is_rivet(d)) {
+            match crate::core::import::rivet_collection(doc) {
+                Ok((collection, spec)) => {
+                    let name = collection.name.clone();
+                    let count = collection.requests.len();
+                    let first = collection.requests.first().cloned();
+                    if let Some(spec) = spec {
+                        self.linked_specs.insert(collection.id.clone(), Arc::new(spec));
+                    }
+                    self.project.collections.push(collection);
+                    self.sync_collection_panel(window, cx);
+                    if let Some(request) = first {
+                        self.open_request(request, window, cx);
+                    }
+                    self.schedule_save(cx);
+                    self.notify_user(format!("Импортирована коллекция «{name}»: {count} запросов"), cx);
+                }
+                Err(e) => self.notify_user(e, cx),
+            }
+            return;
+        }
+        let is_postman = doc.is_some_and(|doc| postman::is_postman(&doc));
         if is_postman {
             match PostmanImport::parse(&text) {
                 Ok(mut imported) => {

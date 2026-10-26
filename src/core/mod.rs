@@ -4,6 +4,7 @@
 pub mod bulk;
 pub mod collection_run;
 pub mod curl;
+pub mod export;
 pub mod header_check;
 pub mod http;
 pub mod import;

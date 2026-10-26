@@ -665,7 +665,7 @@ fn invalid_headers_are_highlighted_with_a_hint(cx: &mut TestAppContext) {
     window.update(|w, cx| {
         w.click(("subtab", RequestEditorTab::Headers as usize), cx);
         w.render_frame(cx);
-        let mut table = w.within("req-headers");
+        let table = w.within("req-headers");
         assert!(table.try_find(("key-issue", 0usize)).is_none());
         assert!(table.try_find(("value-issue", 0usize)).is_none());
         assert!(table.try_find(("key-issue", 1usize)).is_some());
