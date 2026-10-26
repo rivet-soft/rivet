@@ -1,6 +1,7 @@
 //! Cookie manager (like Postman's "Cookies" window): the cookies of every jar
 //! by collection and domain, with delete / clear domain / add.
 
+use crate::ui::ScrollY as _;
 use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -89,7 +90,7 @@ impl Workspace {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
         let cookies = self.http_sessions.cookies();
-        let mut list = div().id("cookie-list").flex().flex_col().gap(px(10.)).flex_1().min_h_0().overflow_y_scroll();
+        let mut list = div().id("cookie-list").flex().flex_col().gap(px(10.)).flex_1().min_h_0().scroll_y(&self.scrolls.get("cookie-list"));
         if cookies.is_empty() {
             list = list.child(
                 div()

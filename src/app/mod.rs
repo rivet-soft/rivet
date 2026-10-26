@@ -307,6 +307,8 @@ enum SidebarMenu {
 }
 
 pub struct Workspace {
+    /// Scroll positions of this view's scroll areas (scrollbars).
+    scrolls: crate::ui::ScrollHandles,
     pub focus: FocusHandle,
     pub rail: RailMode,
     pub project: Project,
@@ -555,6 +557,7 @@ impl Workspace {
         ];
 
         let mut this = Self {
+            scrolls: Default::default(),
             focus,
             rail: RailMode::Requests,
             synced: project.clone(),

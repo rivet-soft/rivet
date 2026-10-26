@@ -7,6 +7,7 @@
 //! `("var-toggle", row)`, `("var-key", row)`, `("var-value", row)`, `("var-desc", row)`,
 //! `("var-eye", row)`, `("var-delete", row)`, `"var-add"`.
 
+use crate::ui::ScrollY as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -63,6 +64,8 @@ struct VarRow {
 }
 
 pub struct EnvPanel {
+    /// Scroll positions of this view's scroll areas (scrollbars).
+    scrolls: crate::ui::ScrollHandles,
     envs: Vec<Environment>,
     active: usize,
     selected: usize,
@@ -99,6 +102,7 @@ impl EnvPanel {
         );
         let active = active.min(envs.len().saturating_sub(1));
         let mut this = Self {
+            scrolls: Default::default(),
             envs,
             active,
             selected: active,
@@ -449,7 +453,7 @@ impl EnvPanel {
                     .flex_1()
                     .min_h_0()
                     .py(px(4.))
-                    .overflow_y_scroll()
+                    .scroll_y(&self.scrolls.get("env-list"))
                     .children(items),
             )
     }
@@ -567,7 +571,7 @@ impl EnvPanel {
             .flex_1()
             .min_w_0()
             .h_full()
-            .overflow_y_scroll()
+            .scroll_y(&self.scrolls.get("env-editor"))
             .p(px(20.))
             .gap(px(14.))
             .child(header)

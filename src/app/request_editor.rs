@@ -5,6 +5,7 @@
 //! Key-value tables are Postman style: the last row is always an empty draft;
 //! typing into it turns it into a real row and appends a fresh draft.
 
+use crate::ui::ScrollY as _;
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
@@ -598,6 +599,8 @@ fn plural_ru(n: usize, one: &'static str, few: &'static str, many: &'static str)
 }
 
 pub struct RequestEditor {
+    /// Scroll positions of this view's scroll areas (scrollbars).
+    scrolls: crate::ui::ScrollHandles,
     spec: RequestSpec,
     tab: RequestEditorTab,
     split_ratio: f32,
@@ -841,6 +844,7 @@ impl RequestEditor {
             },
         ));
         let mut this = Self {
+            scrolls: Default::default(),
             spec: spec.clone(),
             tab: RequestEditorTab::default(),
             split_ratio: 0.48,
@@ -2302,7 +2306,7 @@ impl RequestEditor {
                                                     .id("value-expanded")
                                                     .w(px(width))
                                                     .max_h(px(200.))
-                                                    .overflow_y_scroll()
+                                                    .scroll_y(&self.scrolls.get("expanded"))
                                                     .px(px(4.))
                                                     .py(px(2.))
                                                     .rounded(px(6.))
@@ -2376,7 +2380,11 @@ impl RequestEditor {
             .map(|d| {
                 let natural = path_vars
                     || (target == KvTarget::Params && !self.spec.path_vars.is_empty());
-                if natural { d.flex_none() } else { d.flex_1().min_h_0().overflow_y_scroll() }
+                if natural {
+                    d.flex_none()
+                } else {
+                    d.flex_1().min_h_0().scroll_y(&self.scrolls.get(target.scope()))
+                }
             })
             .child(header)
             .children(rows)
@@ -2397,7 +2405,7 @@ impl RequestEditor {
             .flex_1()
             .min_h_0()
             // Bulk text fills the space itself; rows scroll together with Path Variables.
-            .when(!bulk, |d| d.overflow_y_scroll())
+            .when(!bulk, |d| d.scroll_y(&self.scrolls.get("params-with-path")))
             .child(self.render_kv(KvTarget::Params, cx))
             .child(
                 div()
@@ -2705,7 +2713,7 @@ impl RequestEditor {
             .flex_none()
             .w(px(200.))
             .min_h_0()
-            .overflow_y_scroll()
+            .scroll_y(&self.scrolls.get("req-e"))
             .border_l_1()
             .border_color(p.border)
             .p(px(8.))
@@ -3063,7 +3071,7 @@ impl Render for RequestEditor {
                     .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .scroll_y(&self.scrolls.get("req-f"))
                     .child(RequestRedirectSettings::new(
                         self.spec.follow_redirects,
                         self.redirect_defaults.0,

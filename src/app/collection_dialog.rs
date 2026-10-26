@@ -1,5 +1,6 @@
 //! Reusable modal for saving requests and naming collections, folders or requests.
 
+use crate::ui::ScrollY as _;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -23,6 +24,8 @@ type ConfirmHandler =
 type DismissHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 pub struct CollectionDialog {
+    /// Scroll positions of this view's scroll areas (scrollbars).
+    scrolls: crate::ui::ScrollHandles,
     mode: DialogMode,
     name: Entity<InputState>,
     collections: Vec<Collection>,
@@ -53,6 +56,7 @@ impl CollectionDialog {
             state
         });
         Self {
+            scrolls: Default::default(),
             mode,
             name,
             collections,
@@ -222,7 +226,7 @@ impl Render for CollectionDialog {
                         .id("collection-dialog-body")
                         .px(px(18.))
                         .pb(px(12.))
-                        .overflow_y_scroll()
+                        .scroll_y(&self.scrolls.get("dialog-list"))
                         .child(body),
                 )
                 .child(

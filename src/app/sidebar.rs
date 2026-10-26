@@ -1,4 +1,5 @@
 use gpui_kit::component::input::Input;
+use crate::ui::ScrollY as _;
 use crate::core::tree_ops::{self, Clip, ClipItem};
 use gpui_kit::*;
 
@@ -499,7 +500,7 @@ impl Workspace {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
+            .scroll_y(&self.scrolls.get("collection-tree"))
             .pb(px(8.));
 
         let filtering = !self.filter.is_empty();

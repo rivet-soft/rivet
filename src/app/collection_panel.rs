@@ -1,5 +1,6 @@
 //! Collection management and collection-scoped variables.
 
+use crate::ui::ScrollY as _;
 use crate::core::export::ExportFormat;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -28,6 +29,8 @@ struct VarRow {
 }
 
 pub struct CollectionPanel {
+    /// Scroll positions of this view's scroll areas (scrollbars).
+    scrolls: crate::ui::ScrollHandles,
     collections: Vec<Collection>,
     selected: usize,
     name: Entity<InputState>,
@@ -69,6 +72,7 @@ impl CollectionPanel {
                 }
             });
         let mut this = Self {
+            scrolls: Default::default(),
             collections,
             selected: 0,
             name,
@@ -337,8 +341,8 @@ impl Render for CollectionPanel {
                     .child("Коллекции")
                     .child(IconButton::new("collection-add", IconName::Plus)
                         .on_click(cx.listener(|this, _, window, cx| this.add_collection(window, cx)))))
-                .child(div().id("collection-list-scroll").flex().flex_col().flex_1().overflow_y_scroll().children(items)))
-            .child(div().id("collection-editor-scroll").flex().flex_col().flex_1().min_w_0().overflow_y_scroll().p(px(24.)).gap(px(18.))
+                .child(div().id("collection-list-scroll").flex().flex_col().flex_1().scroll_y(&self.scrolls.get("collection-list")).children(items)))
+            .child(div().id("collection-editor-scroll").flex().flex_col().flex_1().min_w_0().scroll_y(&self.scrolls.get("collection-editor")).p(px(24.)).gap(px(18.))
                 .when_some(selected.zip(delete), |d, (col, delete)| d
                     .child(div().flex().items_center().justify_between()
                         .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).child("Коллекция"))

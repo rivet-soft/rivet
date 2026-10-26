@@ -3,6 +3,7 @@
 //! check. All network and file work runs on the background executor through
 //! [`UpdateHooks`], which tests replace with fakes.
 
+use crate::ui::ScrollY as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -692,7 +693,7 @@ impl Workspace {
                 .id("update-notes")
                 .aria_label(notes.clone())
                 .max_h(px(240.))
-                .overflow_y_scroll()
+                .scroll_y(&self.scrolls.get("update-notes"))
                 .p(px(10.))
                 .rounded(px(8.))
                 .bg(p.bg)

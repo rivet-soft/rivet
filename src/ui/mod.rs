@@ -13,6 +13,7 @@ mod request_redirect_settings;
 mod segmented;
 mod splitter;
 mod tab_actions;
+mod scroll;
 mod tabs;
 mod tree;
 
@@ -34,6 +35,7 @@ pub use splitter::{
 };
 pub use tab_actions::{TabAction, TabActionsMenu};
 pub use tabs::{Tab, TabBar, TabDrag};
+pub use scroll::{ScrollHandles, ScrollY};
 pub use tree::{SectionLabel, TreeRow};
 
 use std::rc::Rc;

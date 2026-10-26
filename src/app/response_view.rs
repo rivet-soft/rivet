@@ -38,6 +38,7 @@
 //!   `"response-elapsed"`, `"cancel"`, `"response-error"` (buttons are its `"primary"` /
 //!   `"secondary"` named children)
 
+use crate::ui::ScrollY as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -586,6 +587,8 @@ struct CopyBindingInstalled;
 impl Global for CopyBindingInstalled {}
 
 pub struct ResponseView {
+    /// Scroll positions of this view's scroll areas (scrollbars).
+    scrolls: crate::ui::ScrollHandles,
     focus: FocusHandle,
     state: ResponseState,
     prepared: Option<Prepared>,
@@ -669,6 +672,7 @@ impl ResponseView {
                 .soft_wrap(true)
         });
         Self {
+            scrolls: Default::default(),
             pretty_editor,
             raw_editor,
             preview_editor,
@@ -1364,7 +1368,7 @@ impl ResponseView {
             .flex()
             .flex_col()
             .size_full()
-            .overflow_y_scroll()
+            .scroll_y(&self.scrolls.get("resp-a"))
             .child(
                 div()
                     .id("tests-summary")
@@ -1535,7 +1539,7 @@ impl ResponseView {
             .flex_col()
             .size_full()
             .pb(px(8.))
-            .overflow_y_scroll()
+            .scroll_y(&self.scrolls.get("resp-b"))
             .children(errors)
             .child(div().flex_none().h(px(6.)))
             .children(lines)
@@ -1860,7 +1864,7 @@ impl ResponseView {
                     .gap(px(6.))
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .scroll_y(&self.scrolls.get("resp-c"))
                     .children(items),
             )
             .test_support()
@@ -1936,7 +1940,7 @@ impl ResponseView {
             .flex()
             .flex_col()
             .size_full()
-            .overflow_y_scroll()
+            .scroll_y(&self.scrolls.get("resp-d"))
             .when(response.redirect_history.len() > 1, |d| {
                 d.child(
                     div()
@@ -2042,7 +2046,7 @@ impl ResponseView {
             .gap(px(6.))
             .p(px(16.))
             .size_full()
-            .overflow_y_scroll()
+            .scroll_y(&self.scrolls.get("resp-e"))
             .text_size(px(12.))
             .child(
                 div()

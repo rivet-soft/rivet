@@ -4,6 +4,7 @@
 //! workspace request line (`request.rs`); connections are kept per request id so
 //! switching tabs never drops a socket.
 
+use crate::ui::ScrollY as _;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -142,6 +143,8 @@ struct HeaderRow {
 }
 
 pub struct WsView {
+    /// Scroll positions of this view's scroll areas (scrollbars).
+    scrolls: crate::ui::ScrollHandles,
     spec: RequestSpec,
     sessions: HashMap<String, Session>,
     generation: u64,
@@ -393,6 +396,7 @@ impl WsView {
         }));
 
         let mut view = Self {
+            scrolls: Default::default(),
             spec: RequestSpec::untitled_ws(),
             sessions: HashMap::new(),
             generation: 0,
@@ -1194,7 +1198,7 @@ impl WsView {
                     .flex_col()
                     .flex_none()
                     .max_h(px(220.))
-                    .overflow_y_scroll()
+                    .scroll_y(&self.scrolls.get("ws-a"))
                     .gap(px(2.))
                     .p(px(8.))
                     .border_t_1()
@@ -1291,7 +1295,7 @@ impl WsView {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
+            .scroll_y(&self.scrolls.get("ws-b"))
             .gap(px(6.))
             .p(px(12.))
             .child(

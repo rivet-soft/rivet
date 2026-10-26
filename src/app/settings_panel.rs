@@ -2,6 +2,7 @@
 //! Includes Settings → MCP: permissions of `rivet mcp`, one-click connection
 //! of AI assistants and the server's activity log.
 
+use crate::ui::ScrollY as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -23,6 +24,8 @@ const ACTIVITY_POLL: Duration = Duration::from_secs(2);
 const NOTICE_TTL: Duration = Duration::from_secs(4);
 
 pub struct SettingsPanel {
+    /// Scroll positions of this view's scroll areas (scrollbars).
+    scrolls: crate::ui::ScrollHandles,
     settings: Settings,
     proxy: Entity<InputState>,
     timeout: Entity<InputState>,
@@ -123,6 +126,7 @@ impl SettingsPanel {
             ),
         ];
         Self {
+            scrolls: Default::default(),
             settings,
             proxy,
             timeout,
@@ -704,7 +708,7 @@ impl Render for SettingsPanel {
             .flex_col()
             .flex_1()
             .min_w_0()
-            .overflow_y_scroll()
+            .scroll_y(&self.scrolls.get("settings"))
             .px(px(36.))
             .py(px(30.))
             .gap(px(22.))
