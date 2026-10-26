@@ -807,7 +807,8 @@ impl Workspace {
         }
         // Unparsable (e.g. written non-atomically, mid-write): wait for the
         // next change; the stamp is recorded so it isn't re-read every tick.
-        let disk: Project = serde_json::from_slice(&bytes).ok()?;
+        let mut disk: Project = serde_json::from_slice(&bytes).ok()?;
+        store::attach_history(&path, &mut disk);
         self.disk_hash = Some(hash);
         let merged = store::merge_projects(&self.synced, &self.project, &disk);
         let old = std::mem::replace(&mut self.project, merged);
@@ -1580,8 +1581,10 @@ impl Workspace {
             &mut self.project,
             HistoryEntry { id: new_id(), at: now_secs(), env: env_name, request: sent, status, duration_ms },
         );
-        let history = self.project.history.clone();
-        self.history_panel.update(cx, |p, cx| p.set_entries(history, cx));
+        // Just the new entry: the history holds up to 10 000 requests.
+        if let Some(entry) = self.project.history.first().cloned() {
+            self.history_panel.update(cx, |p, cx| p.push_entry(entry, cx));
+        }
 
         let report = (!report.is_empty()).then_some(report);
         if let Some(ix) = self.tabs.iter().position(|t| t.request.id == request_id) {
@@ -1686,8 +1689,9 @@ impl Workspace {
                         duration_ms: *duration_ms,
                     },
                 );
-                let history = self.project.history.clone();
-                self.history_panel.update(cx, |p, cx| p.set_entries(history, cx));
+                if let Some(entry) = self.project.history.first().cloned() {
+                    self.history_panel.update(cx, |p, cx| p.push_entry(entry, cx));
+                }
                 self.schedule_save(cx);
             }
         }

@@ -34,11 +34,12 @@ fn save_load_roundtrip_creates_dirs() {
     assert_eq!(store::load_or_default(&path), p);
 
     // No temp files left behind.
-    let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+    let mut names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
-    assert_eq!(names, ["project.json"]);
+    names.sort();
+    assert_eq!(names, ["history.json", "project.json"]);
 
     // Overwrite works.
     p.name = "Renamed".into();
@@ -153,4 +154,50 @@ fn legacy_relay_project_is_migrated_once() {
     std::fs::write(&target, "{\"new\":true}").unwrap();
     assert!(!rivet::core::store::migrate_legacy(&target, &legacy));
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"new\":true}");
+}
+
+#[test]
+fn history_lives_in_its_own_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("project.json");
+    let history = store::history_path(&path);
+    let mut p = store::seed_project();
+    for at in 0..3 {
+        store::push_history(&mut p, entry(at));
+    }
+    store::save(&path, &p).unwrap();
+    let project_text = std::fs::read_to_string(&path).unwrap();
+    assert!(!project_text.contains("\"history\""), "project.json stays small");
+    let history_text = std::fs::read_to_string(&history).unwrap();
+    assert!(history_text.contains("\"h2\""));
+    assert_eq!(store::load(&path).unwrap().history, p.history);
+
+    // Saving the project again without new history doesn't rewrite history.json.
+    let before = std::fs::metadata(&history).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    p.name = "Renamed".into();
+    store::save(&path, &p).unwrap();
+    assert_eq!(std::fs::metadata(&history).unwrap().modified().unwrap(), before);
+    // A new entry does.
+    store::push_history(&mut p, entry(9));
+    store::save(&path, &p).unwrap();
+    assert_eq!(store::load(&path).unwrap().history[0].at, 9);
+}
+
+#[test]
+fn inline_history_of_older_projects_moves_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("project.json");
+    let mut p = store::seed_project();
+    store::push_history(&mut p, entry(1));
+    // An older project.json with the history inline.
+    let mut legacy = serde_json::to_value(&p).unwrap();
+    legacy["history"] = serde_json::to_value(&p.history).unwrap();
+    std::fs::write(&path, legacy.to_string()).unwrap();
+    let loaded = store::load(&path).unwrap();
+    assert_eq!(loaded.history, p.history, "inline history still read");
+    store::save(&path, &loaded).unwrap();
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("\"history\""));
+    assert_eq!(store::load(&path).unwrap().history, p.history, "now from history.json");
+    assert_eq!(HISTORY_CAP, 10_000);
 }

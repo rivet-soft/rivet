@@ -512,7 +512,9 @@ pub struct Project {
     pub active_env: usize,
     #[serde(default)]
     pub collections: Vec<Collection>,
-    #[serde(default)]
+    /// Kept in `history.json` next to project.json (see `store`): read here
+    /// only from older project files, never written into project.json.
+    #[serde(default, skip_serializing)]
     pub history: Vec<HistoryEntry>,
     #[serde(default)]
     pub settings: Settings,

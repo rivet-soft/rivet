@@ -1,5 +1,8 @@
-//! Project persistence (PLAN.md, core::store): one pretty-printed JSON file,
-//! written atomically, with a seed project on first launch or corruption.
+//! Project persistence (PLAN.md, core::store): `project.json` (pretty-printed,
+//! written atomically, a seed project on first launch or corruption) and the
+//! request history in `history.json` beside it. History can hold thousands of
+//! full requests, so it lives apart: saving the project stays small and fast,
+//! and the history file is rewritten only when the history changed.
 
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -9,7 +12,7 @@ use std::time::SystemTime;
 use super::types::{Collection, Environment, HistoryEntry, KeyValue, Project, Settings};
 
 /// Maximum number of history entries kept.
-pub const HISTORY_CAP: usize = 500;
+pub const HISTORY_CAP: usize = 10_000;
 
 /// Product name, also the data directory name.
 pub const APP_NAME: &str = "Rivet";
@@ -46,7 +49,70 @@ pub fn migrate_legacy(path: &Path, legacy: &Path) -> bool {
 
 pub fn load(path: &Path) -> Result<Project, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+    let mut project: Project =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    attach_history(path, &mut project);
+    Ok(project)
+}
+
+/// `history.json` beside `project.json`.
+pub fn history_path(project_path: &Path) -> PathBuf {
+    project_path.with_file_name("history.json")
+}
+
+/// Fills `project.history` from `history.json` when it exists. Older project
+/// files kept the history inline; it stays as loaded and moves to
+/// `history.json` on the next save.
+pub fn attach_history(project_path: &Path, project: &mut Project) {
+    let Ok(text) = fs::read_to_string(history_path(project_path)) else { return };
+    if let Ok(history) = serde_json::from_str::<Vec<HistoryEntry>>(&text) {
+        project.history = history;
+    }
+}
+
+/// Fingerprint of a history list: entries are immutable once recorded, so
+/// their ids (and the count) tell whether the list changed.
+fn history_fingerprint(history: &[HistoryEntry]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    history.len().hash(&mut hasher);
+    for e in history {
+        e.id.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Fingerprint last written (or read) per history file in this process.
+static HISTORY_WRITTEN: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, u64>>> =
+    std::sync::Mutex::new(None);
+
+/// Writes `history.json` unless it already holds this history.
+fn save_history(project_path: &Path, history: &[HistoryEntry]) -> Result<(), String> {
+    let path = history_path(project_path);
+    let fingerprint = history_fingerprint(history);
+    let mut written = HISTORY_WRITTEN.lock().map_err(|_| "history lock poisoned".to_string())?;
+    let written = written.get_or_insert_with(Default::default);
+    if written.get(&path) == Some(&fingerprint) && path.exists() {
+        return Ok(());
+    }
+    if history.is_empty() && !path.exists() {
+        written.insert(path, fingerprint);
+        return Ok(());
+    }
+    let json = serde_json::to_string(history).map_err(|e| e.to_string())?;
+    write_atomic(&path, &json)?;
+    written.insert(path, fingerprint);
+    Ok(())
+}
+
+fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp-{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("{}: {e}", path.display())
+    })
 }
 
 /// Writes `project` to a sibling temp file and renames it over `path`, so a crash
@@ -60,15 +126,11 @@ pub fn save_text(path: &Path, project: &Project) -> Result<String, String> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
+    // History first: once project.json no longer carries it, history.json
+    // must already hold it.
+    save_history(path, &project.history)?;
     let json = serde_json::to_string_pretty(project).map_err(|e| e.to_string())?;
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".tmp-{}", std::process::id()));
-    let tmp = PathBuf::from(tmp);
-    fs::write(&tmp, &json).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("{}: {e}", path.display())
-    })?;
+    write_atomic(path, &json)?;
     Ok(json)
 }
 

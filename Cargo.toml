@@ -26,6 +26,8 @@ http = "1"
 bytes = "1"
 cookie_store = { version = "0.22", default-features = false }
 url = "2"
+# Local time zone for history dates.
+time = { version = "0.3", features = ["local-offset"] }
 flate2 = "1"
 brotli-decompressor = "5"
 # HoverProvider signature (gpui-component editor hover).

@@ -1,7 +1,7 @@
 //! Request history (rail «History», PLAN.md app::history_panel): filterable,
 //! newest-first list grouped by day, virtualized with `uniform_list`.
 //!
-//! Times are shown in **UTC** (no timezone database without chrono).
+//! Days and times use the system's time zone (UTC when it can't be read).
 //!
 //! Element ids: `"history-filter"`, `"history-clear"`, `"history-list"`,
 //! `("history-row", entry_ix)` where `entry_ix` indexes [`HistoryPanel::entries`].
@@ -36,6 +36,8 @@ pub struct HistoryPanel {
     filter_input: Entity<InputState>,
     filter: String,
     items: Vec<Item>,
+    /// System time zone offset (seconds east of UTC) used for days and times.
+    utc_offset: i64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -61,6 +63,7 @@ impl HistoryPanel {
             filter_input,
             filter: String::new(),
             items: Vec::new(),
+            utc_offset: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -69,6 +72,14 @@ impl HistoryPanel {
     pub fn set_entries(&mut self, mut entries: Vec<HistoryEntry>, cx: &mut Context<Self>) {
         entries.sort_by(|a, b| b.at.cmp(&a.at));
         self.entries = entries;
+        self.rebuild_items();
+        cx.notify();
+    }
+
+    /// Adds the newest entry (after a send) without re-sorting the list.
+    pub fn push_entry(&mut self, entry: HistoryEntry, cx: &mut Context<Self>) {
+        self.entries.insert(0, entry);
+        self.entries.truncate(crate::core::store::HISTORY_CAP);
         self.rebuild_items();
         cx.notify();
     }
@@ -109,17 +120,21 @@ impl HistoryPanel {
     }
 
     fn rebuild_items(&mut self) {
-        let now = now_secs();
+        let offset = local_offset(now_secs());
+        self.utc_offset = offset;
+        let shift = |t: u64| (t as i64 + offset).max(0) as u64;
+        let now = shift(now_secs());
         let mut items = Vec::new();
         let mut last_day = None;
         for (ix, e) in self.entries.iter().enumerate() {
             if !self.matches(e) {
                 continue;
             }
-            let day = e.at / 86_400;
+            let at = shift(e.at);
+            let day = at / 86_400;
             if last_day != Some(day) {
                 last_day = Some(day);
-                items.push(Item::Day(day_label(e.at, now).into()));
+                items.push(Item::Day(day_label(at, now).into()));
             }
             items.push(Item::Entry(ix));
         }
@@ -134,9 +149,9 @@ impl HistoryPanel {
                 .h(px(ROW_H))
                 .px(px(14.))
                 .pb(px(5.))
-                .text_size(px(10.5))
+                .text_size(px(11.5))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(p.text_dim)
+                .text_color(p.text)
                 .child(label.clone())
                 .into_any_element(),
             Item::Entry(ix) => {
@@ -214,7 +229,7 @@ impl HistoryPanel {
                             .font_family(MONO)
                             .text_size(px(11.))
                             .text_color(p.text_dim)
-                            .child(format_hm(e.at)),
+                            .child(format_hm((e.at as i64 + self.utc_offset).max(0) as u64)),
                     )
                     .test_support()
                     .into_any_element()
@@ -328,13 +343,22 @@ pub fn format_ms(ms: u64) -> String {
     }
 }
 
-/// `HH:MM` (UTC).
+/// System time zone offset at `at`, in seconds east of UTC (0 if unknown).
+pub fn local_offset(at: u64) -> i64 {
+    time::OffsetDateTime::from_unix_timestamp(at as i64)
+        .ok()
+        .and_then(|t| time::UtcOffset::local_offset_at(t).ok())
+        .map_or(0, |o| i64::from(o.whole_seconds()))
+}
+
+/// `HH:MM` of a timestamp already shifted to the wanted time zone.
 pub fn format_hm(at: u64) -> String {
     let s = at % 86_400;
     format!("{:02}:{:02}", s / 3600, s % 3600 / 60)
 }
 
-/// "Сегодня", "Вчера" or `DD.MM.YYYY` (UTC days) for `at` relative to `now`.
+/// "Сегодня", "Вчера" or `DD.MM.YYYY` for `at` relative to `now` (both
+/// already shifted to the wanted time zone).
 pub fn day_label(at: u64, now: u64) -> String {
     let (day, today) = (at / 86_400, now / 86_400);
     if day == today {
