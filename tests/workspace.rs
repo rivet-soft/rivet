@@ -1907,3 +1907,63 @@ fn live_mock_through_the_ui(cx: &mut TestAppContext) {
         .unwrap();
     assert!(String::from_utf8_lossy(&left.stdout).trim().is_empty(), "container stopped");
 }
+
+/// A mock started outside the window (as `rivet mcp` does) shows up in it,
+/// and disappears once stopped elsewhere. Real Docker:
+/// `cargo test --test workspace external_mocks -- --ignored`.
+#[gpui_kit::test]
+#[ignore]
+fn external_mocks_are_adopted(cx: &mut TestAppContext) {
+    use rivet::app::MockState;
+    use rivet::core::mock;
+    let dir = std::env::temp_dir().join(format!("rivet-ext-mock-{}", rivet::core::new_id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("project.json");
+    let mut p = project();
+    let mut r = rivet::core::RequestSpec::new("Ping", Method::Get, "{{baseUrl}}/ping");
+    r.examples = vec![rivet::core::Example {
+        id: "e".into(), name: "pong".into(), status: 200, status_text: "OK".into(),
+        headers: vec![], body: "pong".into(), url: None, saved_at: 0,
+    }];
+    p.collections[0].requests.push(r);
+    store::save(&path, &p).unwrap();
+    let id = p.collections[0].id.clone();
+    let docker = mock::find_docker().expect("docker");
+    let settings = rivet::core::mock::MockSettings::default();
+    let port = mock::free_port(settings.port, &[]).unwrap();
+    let run = mock::start(&docker, &settings, &p.collections[0], None, &mock::mock_dir(Some(&path), &id), port).unwrap();
+
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        Palette::dark().apply(cx);
+        app::bind_keys(cx);
+    });
+    let project = store::load(&path).unwrap();
+    let store_path = path.clone();
+    let (view, window) = cx.add_window_view(move |window, cx| Workspace::new(project, Some(store_path), window, cx));
+    let mut adopted = None;
+    for _ in 0..100 {
+        window.run_until_parked();
+        if let Some(MockState::Running(r)) = view.read_with(window, |v, _| v.mock_state(&id).cloned()) {
+            adopted = Some(r);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let adopted = adopted.expect("external mock adopted");
+    mock::stop(&docker, &run).unwrap();
+    assert_eq!(adopted.url, run.url);
+    assert_eq!(adopted.coverage.from_examples, 1);
+    view.update_in(window, |v, window, cx| v.set_rail(RailMode::Collections, window, cx));
+    let mut forgotten = false;
+    for _ in 0..100 {
+        window.run_until_parked();
+        if view.read_with(window, |v, _| v.mock_state(&id).is_none()) {
+            forgotten = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(forgotten, "mock stopped elsewhere is forgotten");
+}

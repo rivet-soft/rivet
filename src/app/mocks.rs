@@ -190,6 +190,49 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Picks up mocks started outside this window (`rivet mcp`, a previous run)
+    /// and forgets ones stopped elsewhere — Docker labels say whose they are.
+    /// Only for a window with a project file (not for headless tests).
+    pub fn sync_mocks_with_docker(&mut self, cx: &mut Context<Self>) {
+        if self.store_path.is_none() {
+            return;
+        }
+        let work = cx.background_spawn(async move {
+            let docker = mock::find_docker()?;
+            mock::running_mocks(&docker).ok()
+        });
+        cx.spawn(async move |this, cx| {
+            let Some(found) = work.await else { return };
+            this.update(cx, |this, cx| this.adopt_mocks(found, cx)).ok();
+        })
+        .detach();
+    }
+
+    fn adopt_mocks(&mut self, found: Vec<(String, MockRun)>, cx: &mut Context<Self>) {
+        let mut changed = false;
+        // Stopped elsewhere.
+        self.mocks.retain(|id, state| {
+            let keep = !matches!(state, MockState::Running(_)) || found.iter().any(|(f, _)| f == id);
+            changed |= !keep;
+            keep
+        });
+        for (id, mut run) in found {
+            if matches!(self.mocks.get(&id), Some(MockState::Running(_) | MockState::Starting)) {
+                continue;
+            }
+            let Some(collection) = self.project.collections.iter().find(|c| c.id == id) else { continue };
+            let spec = self.mock_spec(&id);
+            run.coverage = match run.engine {
+                mock::MockEngine::WireMock => mock::wiremock_mappings(collection, spec.as_deref()).1,
+            };
+            self.mocks.insert(id, MockState::Running(run));
+            changed = true;
+        }
+        if changed {
+            self.mock_changed(cx);
+        }
+    }
+
     /// App quit: stop every running mock container (blocking, short timeouts).
     pub(super) fn stop_all_mocks(&mut self) {
         let runs: Vec<MockRun> = self

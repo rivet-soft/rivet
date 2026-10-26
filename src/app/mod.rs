@@ -640,6 +640,7 @@ impl Workspace {
         };
         this.restart_update_timer(cx);
         this.sync_update_status(cx);
+        this.sync_mocks_with_docker(cx);
         this
     }
 
@@ -2740,6 +2741,7 @@ impl Workspace {
         }
         if mode == RailMode::Collections {
             self.sync_collection_panel(window, cx);
+            self.sync_mocks_with_docker(cx);
         }
         self.rail = mode;
         window.focus(&self.focus, cx);
