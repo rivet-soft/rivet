@@ -64,6 +64,10 @@ pub enum BodyKind {
     Multipart,
     /// Raw bytes read from `Body::file_path`.
     Binary,
+    /// GraphQL: `text` is the query, `variables` its JSON variables; sent as
+    /// `{"query": …, "variables": …}`.
+    #[serde(rename = "graphql")]
+    GraphQl,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +80,9 @@ pub struct Body {
     pub form: Vec<KeyValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_path: Option<std::path::PathBuf>,
+    /// GraphQL variables (JSON text).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub variables: String,
 }
 
 impl Body {
@@ -85,6 +92,7 @@ impl Body {
             text: text.into(),
             form: Vec::new(),
             file_path: None,
+            variables: String::new(),
         }
     }
 }
@@ -617,6 +625,8 @@ pub enum SendError {
         message: String,
         line: Option<u32>,
     },
+    /// The body can't be built (e.g. GraphQL variables that aren't JSON).
+    InvalidBody(String),
     /// A header name/value HTTP forbids (line break, control char, space in
     /// the name…); the request was not sent.
     InvalidHeader {
@@ -636,6 +646,7 @@ impl std::fmt::Display for SendError {
             SendError::Script { message, line: Some(l) } => write!(f, "Pre-request script, line {l}: {message}"),
             SendError::Script { message, line: None } => write!(f, "Pre-request script: {message}"),
             SendError::InvalidHeader { name, message } => write!(f, "Header «{name}»: {message}"),
+            SendError::InvalidBody(message) => write!(f, "Body: {message}"),
         }
     }
 }

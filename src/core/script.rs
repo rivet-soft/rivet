@@ -244,6 +244,7 @@ fn body_mode(kind: BodyKind) -> &'static str {
         BodyKind::Form => "urlencoded",
         BodyKind::Multipart => "formdata",
         BodyKind::Binary => "file",
+        BodyKind::GraphQl => "graphql",
     }
 }
 

@@ -481,6 +481,21 @@ pub fn resolve(req: &RequestSpec, env: Option<&Environment>) -> Result<ResolvedR
 
     let body = match req.body.kind {
         BodyKind::None => None,
+        BodyKind::GraphQl => {
+            let query = sub(&req.body.text);
+            let raw = sub(&req.body.variables);
+            let variables = if raw.trim().is_empty() {
+                serde_json::Value::Object(Default::default())
+            } else {
+                serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| {
+                    SendError::InvalidBody(format!("переменные GraphQL — не JSON ({e})"))
+                })?
+            };
+            if !has_header(&headers, "content-type") {
+                headers.push(("Content-Type".into(), "application/json".into()));
+            }
+            Some(serde_json::json!({"query": query, "variables": variables}).to_string().into_bytes())
+        }
         BodyKind::Json | BodyKind::Text => {
             let text = sub(&req.body.text);
             if !has_header(&headers, "content-type") {
@@ -745,6 +760,32 @@ mod tests {
     }
 
     #[test]
+    fn graphql_body() {
+        let mut r = RequestSpec::new("g", Method::Post, "{{baseUrl}}/graphql");
+        r.body = Body {
+            kind: BodyKind::GraphQl,
+            text: "query($id: ID!) { user(id: $id) { name } }".into(),
+            variables: "{\"id\": \"{{id}}\"}".into(),
+            ..Body::default()
+        };
+        let res = resolve(&r, Some(&env())).unwrap();
+        let sent: serde_json::Value = serde_json::from_slice(res.body.as_deref().unwrap()).unwrap();
+        assert_eq!(sent["query"], "query($id: ID!) { user(id: $id) { name } }");
+        assert_eq!(sent["variables"], serde_json::json!({"id": "42"}));
+        assert!(res.headers.contains(&("Content-Type".into(), "application/json".into())));
+        // No variables → {}; broken JSON → a readable error, nothing sent.
+        r.body.variables = "  ".into();
+        let res = resolve(&r, Some(&env())).unwrap();
+        let sent: serde_json::Value = serde_json::from_slice(res.body.as_deref().unwrap()).unwrap();
+        assert_eq!(sent["variables"], serde_json::json!({}));
+        r.body.variables = "{id: 1}".into();
+        match resolve(&r, Some(&env())) {
+            Err(SendError::InvalidBody(m)) => assert!(m.contains("переменные GraphQL"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn path_variables() {
         assert_eq!(path_variable_names("{{baseUrl}}/users/:id/posts/:post_id?x=:q#:f"), ["id", "post_id"]);
         assert_eq!(path_variable_names("http://localhost:8080/:a/:a/:/x:y"), ["a"]);
@@ -833,6 +874,7 @@ mod tests {
             text: String::new(),
             form: vec![KeyValue::new("a b", "c&d")],
             file_path: None,
+            ..Body::default()
         };
         r.headers.clear();
         r.auth = Auth::Basic {

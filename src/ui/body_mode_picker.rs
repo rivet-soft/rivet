@@ -34,6 +34,7 @@ impl RenderOnce for BodyModePicker {
             "raw JSON",
             "raw Text",
             "binary",
+            "GraphQL",
         ];
         div()
             .id("body-mode")

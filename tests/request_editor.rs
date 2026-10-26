@@ -922,3 +922,36 @@ fn request_connection_settings_override_ssl_and_timeout(cx: &mut TestAppContext)
         assert_eq!(editor.spec().ssl_verify, None);
     });
 }
+
+#[gpui_kit::test]
+fn graphql_body_mode_edits_query_and_variables(cx: &mut TestAppContext) {
+    let (view, window, events) = open(cx, sample());
+    window.update(|w, cx| {
+        w.within("body-mode").click(6usize, cx);
+        w.render_frame(cx);
+        assert!(w.try_find("graphql-body").is_some());
+    });
+    assert_eq!(view.read_with(window, |v, _| v.spec().body.kind), BodyKind::GraphQl);
+    view.update_in(window, |v, window, cx| {
+        let mut spec = v.spec().clone();
+        spec.body.text = "{ users { id } }".into();
+        spec.body.variables = "{\"first\": 5}".into();
+        v.set_spec(spec, window, cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| {
+        assert_eq!(v.spec().body.text, "{ users { id } }");
+        assert_eq!(v.spec().body.variables, "{\"first\": 5}");
+    });
+    // Back to raw JSON: the shared text shows up in the JSON editor.
+    events.borrow_mut().clear();
+    window.update(|w, cx| {
+        w.within("body-mode").click(3usize, cx);
+        w.render_frame(cx);
+    });
+    view.read_with(window, |v, cx| {
+        assert_eq!(v.spec().body.kind, BodyKind::Json);
+        assert_eq!(v.body_editor().read(cx).value().as_str(), "{ users { id } }");
+    });
+    assert!(events.borrow().contains(&RequestEditorEvent::Changed));
+}

@@ -276,6 +276,7 @@ impl Spec {
                         text: String::new(),
                         form: form_fields,
                         file_path: None,
+                        ..Body::default()
                     },
                     content_type: (kind != BodyKind::Multipart).then(|| consumes.to_string()),
                 });
@@ -314,6 +315,7 @@ impl Spec {
             text: String::new(),
             form: Vec::new(),
             file_path: None,
+            ..Body::default()
         };
         match kind {
             BodyKind::Json => {
@@ -357,7 +359,7 @@ impl Spec {
                     }
                 }
             }
-            BodyKind::Binary | BodyKind::None => {}
+            BodyKind::Binary | BodyKind::None | BodyKind::GraphQl => {}
         }
         GeneratedRequestBody {
             body,

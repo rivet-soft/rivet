@@ -232,6 +232,10 @@ fn pm_body(request: &RequestSpec, warnings: &mut Vec<String>) -> Option<Value> {
                 v
             }).collect::<Vec<_>>(),
         }),
+        BodyKind::GraphQl => json!({
+            "mode": "graphql",
+            "graphql": {"query": body.text, "variables": body.variables},
+        }),
         BodyKind::Binary => {
             let src = body.file_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
             if src.is_empty() {
@@ -695,6 +699,18 @@ pub fn to_openapi(collection: &Collection) -> (Value, Vec<String>) {
             BodyKind::Multipart => Some(json!({
                 "multipart/form-data": {"schema": form_schema(&body.form, true)},
             })),
+            BodyKind::GraphQl => Some(json!({
+                "application/json": {
+                    "schema": {"type": "object", "properties": {
+                        "query": {"type": "string"},
+                        "variables": {"type": "object"},
+                    }},
+                    "example": {
+                        "query": body.text,
+                        "variables": serde_json::from_str::<Value>(&body.variables).unwrap_or_else(|_| json!({})),
+                    },
+                },
+            })),
             BodyKind::Binary => Some(json!({
                 "application/octet-stream": {"schema": {"type": "string", "format": "binary"}},
             })),
@@ -992,6 +1008,21 @@ mod tests {
         assert_eq!(outcome.collection.requests.len(), c.requests.len());
         assert!(outcome.collection.requests.iter().any(|r| r.is_ws()), "WebSocket kept");
         assert_eq!(outcome.collection.folders, c.folders);
+    }
+
+    #[test]
+    fn graphql_round_trips_through_postman() {
+        let mut c = Collection::new("G");
+        let mut q = RequestSpec::new("Users", Method::Post, "https://h/graphql");
+        q.body = Body { kind: BodyKind::GraphQl, text: "{ users { id } }".into(), variables: "{\"n\": 1}".into(), ..Body::default() };
+        c.requests.push(q);
+        let (doc, _) = to_postman(&c);
+        assert_eq!(doc["item"][0]["request"]["body"]["mode"], "graphql");
+        let back = PostmanImport::parse(&doc.to_string()).unwrap().collection;
+        assert_eq!(back.requests[0].body, c.requests[0].body);
+        let (oas, _) = to_openapi(&c);
+        let example = &oas["paths"]["/graphql"]["post"]["requestBody"]["content"]["application/json"]["example"];
+        assert_eq!(example, &json!({"query": "{ users { id } }", "variables": {"n": 1}}));
     }
 
     #[test]

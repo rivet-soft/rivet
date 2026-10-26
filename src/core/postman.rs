@@ -279,6 +279,7 @@ fn parse_request(
                     text,
                     form: Vec::new(),
                     file_path: None,
+                    ..Body::default()
                 };
             }
             Some("urlencoded") => {
@@ -287,6 +288,7 @@ fn parse_request(
                     text: String::new(),
                     form: key_values(body.get("urlencoded"), "key"),
                     file_path: None,
+                    ..Body::default()
                 }
             }
             Some("formdata") => {
@@ -341,11 +343,18 @@ fn parse_request(
                     .pointer("/graphql/query")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                let variables = body
-                    .pointer("/graphql/variables")
-                    .and_then(Value::as_str)
-                    .unwrap_or("{}");
-                request.body = Body::json(serde_json::json!({"query": query, "variables": serde_json::from_str::<Value>(variables).unwrap_or(Value::Object(Default::default()))}).to_string());
+                // Variables are a JSON string, or (older exports) an object.
+                let variables = match body.pointer("/graphql/variables") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v) if !v.is_null() => serde_json::to_string_pretty(v).unwrap_or_default(),
+                    _ => String::new(),
+                };
+                request.body = Body {
+                    kind: BodyKind::GraphQl,
+                    text: query.to_string(),
+                    variables,
+                    ..Body::default()
+                };
             }
             Some(_) => *unsupported_bodies += 1,
             _ => {}

@@ -498,6 +498,7 @@ pub fn parse_curl(cmd: &str) -> Option<RequestSpec> {
                 text: String::new(),
                 form: split_query(&joined),
                 file_path: None,
+                ..Body::default()
             }
         } else {
             if content_type.is_none() {
@@ -512,6 +513,7 @@ pub fn parse_curl(cmd: &str) -> Option<RequestSpec> {
                 text: joined,
                 form: Vec::new(),
                 file_path: None,
+                ..Body::default()
             }
         };
     }

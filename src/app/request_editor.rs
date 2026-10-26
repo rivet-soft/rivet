@@ -193,13 +193,14 @@ impl AuthKind {
     }
 }
 
-const BODY_KINDS: [BodyKind; 6] = [
+const BODY_KINDS: [BodyKind; 7] = [
     BodyKind::None,
     BodyKind::Multipart,
     BodyKind::Form,
     BodyKind::Json,
     BodyKind::Text,
     BodyKind::Binary,
+    BodyKind::GraphQl,
 ];
 const MIN_DETAILS_HEIGHT: f32 = 140.;
 const MIN_BODY_HEIGHT: f32 = 170.;
@@ -654,6 +655,11 @@ pub struct RequestEditor {
     pre_script: Entity<EditorState>,
     /// Docs tab: the request description.
     docs_editor: Entity<EditorState>,
+    /// GraphQL body: query (`body.text`) and variables (`body.variables`).
+    graphql_query: Entity<EditorState>,
+    graphql_variables: Entity<EditorState>,
+    /// The body kind changed: re-sync the raw/GraphQL editors with `body.text`.
+    body_editors_stale: bool,
     post_script: Entity<EditorState>,
     _subscriptions: Vec<Subscription>,
 }
@@ -792,6 +798,34 @@ impl RequestEditor {
             ));
         }
 
+        let graphql_query = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .line_number(true)
+                .placeholder("query { users(first: 10) { id name } }")
+        });
+        let graphql_variables = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .language("json")
+                .line_number(true)
+                .placeholder("{ \"id\": \"{{userId}}\" }")
+        });
+        for (state, variables) in [(&graphql_query, false), (&graphql_variables, true)] {
+            subscriptions.push(cx.subscribe_in(
+                state,
+                window,
+                move |this, state, ev: &InputEvent, _, cx| {
+                    if let InputEvent::Change = ev {
+                        let text = state.read(cx).value().to_string();
+                        let slot = if variables { &mut this.spec.body.variables } else { &mut this.spec.body.text };
+                        if *slot != text {
+                            *slot = text;
+                            cx.emit(RequestEditorEvent::Changed);
+                        }
+                        cx.notify();
+                    }
+                },
+            ));
+        }
         subscriptions.push(cx.subscribe_in(
             &docs_editor,
             window,
@@ -846,6 +880,9 @@ impl RequestEditor {
             pre_script,
             post_script,
             docs_editor,
+            graphql_query,
+            graphql_variables,
+            body_editors_stale: false,
             _subscriptions: subscriptions,
         };
         this.set_spec(spec, window, cx);
@@ -895,6 +932,9 @@ impl RequestEditor {
 
         let docs = self.spec.description.clone();
         self.docs_editor.update(cx, |s, cx| s.set_value(docs, window, cx));
+        let (query, variables) = (self.spec.body.text.clone(), self.spec.body.variables.clone());
+        self.graphql_query.update(cx, |s, cx| s.set_value(query, window, cx));
+        self.graphql_variables.update(cx, |s, cx| s.set_value(variables, window, cx));
         for stage in ScriptStage::ALL {
             let text = stage.script(&self.spec).to_string();
             self.script_editor(stage)
@@ -1094,6 +1134,9 @@ impl RequestEditor {
 
     pub fn set_body_kind(&mut self, kind: BodyKind, cx: &mut Context<Self>) {
         if self.spec.body.kind != kind {
+            // JSON/Text and the GraphQL query share `body.text`: refresh the
+            // editor that becomes visible (on the next render: it needs a window).
+            self.body_editors_stale = true;
             self.spec.body.kind = kind;
             self.body_error = None;
             self.field_hover = None;
@@ -2408,6 +2451,46 @@ impl RequestEditor {
             });
 
         let content = match kind {
+            BodyKind::GraphQl => div()
+                .id("graphql-body")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    div().flex().flex_col().flex_grow(2.).flex_basis(relative(0.)).min_h_0().child(
+                        Editor::new(&self.graphql_query)
+                            .appearance(false)
+                            .bordered(false)
+                            .font_family(MONO)
+                            .text_size(px(12.))
+                            .h(relative(1.)),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(14.))
+                        .py(px(4.))
+                        .border_t_1()
+                        .border_b_1()
+                        .border_color(p.border)
+                        .text_size(px(10.5))
+                        .text_color(p.text_dim)
+                        .child("GRAPHQL VARIABLES (JSON)"),
+                )
+                .child(
+                    div().flex().flex_col().flex_grow(1.).flex_basis(relative(0.)).min_h_0().child(
+                        Editor::new(&self.graphql_variables)
+                            .appearance(false)
+                            .bordered(false)
+                            .font_family(MONO)
+                            .text_size(px(12.))
+                            .h(relative(1.)),
+                    ),
+                )
+                .test_support()
+                .into_any_element(),
             BodyKind::None => div()
                 .flex()
                 .flex_1()
@@ -2921,6 +3004,17 @@ impl RequestEditor {
 
 impl Render for RequestEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.body_editors_stale) {
+            let text = self.spec.body.text.clone();
+            let editor = if self.spec.body.kind == BodyKind::GraphQl {
+                &self.graphql_query
+            } else {
+                &self.body_editor
+            };
+            if editor.read(cx).value().as_str() != text.as_str() {
+                editor.clone().update(cx, |s, cx| s.set_value(text, window, cx));
+            }
+        }
         // Repaint variable highlights in the new palette after a theme switch.
         if self
             .body_vars

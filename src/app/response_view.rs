@@ -2271,6 +2271,11 @@ impl ResponseView {
                 "Не удалось прочитать файл".to_string(),
                 format!("{path}: {message}"),
             ),
+            SendError::InvalidBody(message) => (
+                "INVALID_BODY".to_string(),
+                "Тело запроса не собрано".to_string(),
+                format!("{message}. Запрос не отправлен: исправьте тело во вкладке Body."),
+            ),
             SendError::InvalidHeader { name, message } => (
                 "INVALID_HEADER".to_string(),
                 format!("Недопустимый заголовок «{name}»"),

@@ -459,11 +459,23 @@ fn delete_with_body_and_options() {
         text: "bye".into(),
         form: vec![],
         file_path: None,
+        variables: String::new(),
     };
     let (_, json) = send(&spec, None);
     assert_eq!(json["method"], "DELETE");
     assert_eq!(json["body"], "bye");
     assert_eq!(json["headers"]["content-type"], "text/plain");
+
+    let mut gql = RequestSpec::new("gql", Method::Post, format!("{base}/echo"));
+    gql.body = Body {
+        kind: rivet::core::BodyKind::GraphQl,
+        text: "{ me { id } }".into(),
+        variables: "{\"a\": 1}".into(),
+        ..Body::default()
+    };
+    let (_, json) = send(&gql, None);
+    assert_eq!(json["body"], r#"{"query":"{ me { id } }","variables":{"a":1}}"#);
+    assert_eq!(json["headers"]["content-type"], "application/json");
 
     let spec = RequestSpec::new("opt", Method::Options, format!("{base}/echo"));
     let (_, json) = send(&spec, None);

@@ -122,7 +122,7 @@ pub fn body(value: &Value) -> Result<Body, String> {
             };
             let form = obj.get("form").map(|f| key_values(f, "body.form")).transpose()?.unwrap_or_default();
             let file_path = obj.get("file_path").and_then(Value::as_str).map(std::path::PathBuf::from);
-            Ok(Body { kind, text, form, file_path })
+            Ok(Body { kind, text, form, file_path, ..Body::default() })
         }
         other => Ok(Body::json(serde_json::to_string_pretty(other).unwrap_or_default())),
     }
