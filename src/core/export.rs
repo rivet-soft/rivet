@@ -443,7 +443,7 @@ fn form_schema(fields: &[KeyValue], multipart: bool) -> Value {
 /// Splits a request URL into an optional server and an OpenAPI path template.
 /// `{{baseUrl}}/users/{{id}}` → (`{{baseUrl}}`, `/users/{id}`) with `id` as a
 /// path variable; `https://h/x` → (`https://h`, `/x`).
-fn split_url(url: &str) -> (String, String, Vec<String>) {
+pub(crate) fn split_url(url: &str) -> (String, String, Vec<String>) {
     let base = url.split(['?', '#']).next().unwrap_or("");
     let (server, path) = if let Some(rest) = base.strip_prefix("{{") {
         match rest.find("}}") {

@@ -418,8 +418,9 @@ pub struct Settings {
     /// Keep cookies between requests during this app session (within each collection).
     #[serde(default = "yes")]
     pub cookies_enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mock_server: Option<String>,
+    /// Mock servers (Settings → Моки).
+    #[serde(default)]
+    pub mock: super::mock::MockSettings,
     /// HTTP protocol to use (see [`HttpVersionPref`]).
     #[serde(default)]
     pub http_version: HttpVersionPref,
@@ -489,7 +490,7 @@ impl Default for Settings {
             follow_redirects: true,
             max_redirects: default_max_redirects(),
             cookies_enabled: true,
-            mock_server: None,
+            mock: super::mock::MockSettings::default(),
             http_version: HttpVersionPref::Auto,
             mcp: McpSettings::default(),
             auto_update: true,

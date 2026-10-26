@@ -12,6 +12,7 @@ pub mod http;
 pub mod import;
 pub mod mcp_activity;
 pub mod mcp_clients;
+pub mod mock;
 pub mod openapi;
 pub(crate) mod openapi_refs;
 pub mod postman;
