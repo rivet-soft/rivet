@@ -574,7 +574,7 @@ fn bulk_edit_round_trips_params_and_headers(cx: &mut TestAppContext) {
     spec.params[0].description = "page size".into();
     let (view, window, events) = open(cx, spec);
     window.update(|w, cx| {
-        w.click("bulk-toggle", cx);
+        w.within("req-params").click("bulk-toggle", cx);
         w.render_frame(cx);
         assert!(w.within("req-params").try_find("bulk-editor").is_some());
         assert!(w.within("req-params").try_find(("key", 0usize)).is_none());
@@ -623,7 +623,7 @@ fn bulk_edit_round_trips_params_and_headers(cx: &mut TestAppContext) {
 
     // Back to the table: rows rebuilt from the edited list (+ draft row).
     window.update(|w, cx| {
-        w.click("bulk-toggle", cx);
+        w.within("req-params").click("bulk-toggle", cx);
         w.render_frame(cx);
         assert!(w.within("req-params").try_find("bulk-editor").is_none());
         assert!(w.within("req-params").try_find(("key", 4usize)).is_some());
@@ -639,7 +639,7 @@ fn bulk_edit_round_trips_params_and_headers(cx: &mut TestAppContext) {
     window.update(|w, cx| {
         w.click(("subtab", RequestEditorTab::Headers as usize), cx);
         w.render_frame(cx);
-        w.click("bulk-toggle", cx);
+        w.within("req-headers").click("bulk-toggle", cx);
         w.render_frame(cx);
         assert!(w.within("req-headers").try_find("bulk-editor").is_some());
     });
@@ -753,5 +753,54 @@ fn long_value_cell_expands_while_focused(cx: &mut TestAppContext) {
         assert!(!v.has_expanded_value());
         assert_eq!(v.spec().headers[0].value, "short=1");
         let _ = cx;
+    });
+}
+
+#[gpui_kit::test]
+fn bulk_edit_in_body_form_table(cx: &mut TestAppContext) {
+    let mut spec = sample();
+    spec.body.kind = BodyKind::Form;
+    spec.body.form = vec![
+        KeyValue::new("sdafasdf", "asdfdfas"),
+        KeyValue::new("asads", "Asdsda").enabled(false),
+    ];
+    let (view, window, _) = open(cx, spec);
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        // The toggle sits in the form table's header, right-aligned.
+        let header_toggle = w.within("req-form").find("bulk-toggle").bounds();
+        let table = w.find("request-body-pane").bounds();
+        let right = (header_toggle.origin.x + header_toggle.size.width).as_f32();
+        assert!(((table.origin.x + table.size.width).as_f32() - right).abs() < 20.);
+        w.within("req-form").click("bulk-toggle", cx);
+        w.render_frame(cx);
+        assert!(w.within("req-form").try_find("bulk-editor").is_some());
+        // The Params table above keeps its rows.
+        assert!(w.within("req-params").try_find("bulk-editor").is_none());
+    });
+    view.read_with(window, |v, cx| {
+        assert!(v.is_bulk_edit(RequestEditorTab::Body));
+        assert!(!v.is_bulk_edit(RequestEditorTab::Params));
+        assert_eq!(
+            v.bulk_text(RequestEditorTab::Body, cx).as_deref(),
+            Some("sdafasdf:asdfdfas\n//asads:Asdsda")
+        );
+    });
+    window.update(|w, cx| {
+        w.within("req-form").click("bulk-editor", cx);
+        w.press("cmd-a", cx);
+        w.input("a:1\n//b:2", cx);
+    });
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        w.within("req-form").click("bulk-toggle", cx);
+        w.render_frame(cx);
+        assert!(w.within("req-form").try_find(("key", 1usize)).is_some());
+    });
+    view.read_with(window, |v, _| {
+        let form = &v.spec().body.form;
+        assert_eq!(form.len(), 2);
+        assert_eq!((form[0].key.as_str(), form[0].value.as_str(), form[0].enabled), ("a", "1", true));
+        assert_eq!((form[1].key.as_str(), form[1].value.as_str(), form[1].enabled), ("b", "2", false));
     });
 }

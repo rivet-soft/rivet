@@ -283,6 +283,7 @@ impl KvTarget {
         match tab {
             RequestEditorTab::Params => Some(Self::Params),
             RequestEditorTab::Headers => Some(Self::Headers),
+            RequestEditorTab::Body => Some(Self::Form),
             _ => None,
         }
     }
@@ -1327,7 +1328,7 @@ impl RequestEditor {
         cx.notify();
     }
 
-    /// Whether `tab` (Params / Headers) shows its rows as `key:value` text.
+    /// Whether `tab` (Params / Headers / Body form) shows its rows as `key:value` text.
     pub fn is_bulk_edit(&self, tab: RequestEditorTab) -> bool {
         KvTarget::of_tab(tab).is_some_and(|t| self.bulk.iter().any(|b| b.target == t))
     }
@@ -1339,10 +1340,11 @@ impl RequestEditor {
         Some(bulk.editor.read(cx).value().to_string())
     }
 
-    /// Switches the active Params / Headers table between rows and bulk text.
+    /// Switches the Params / Headers / Body form table of `tab` between rows
+    /// and bulk text ("Bulk Edit" / "Key-Value Edit" in the table header).
     /// Rows → text → rows keeps order, enabled flags and descriptions.
-    pub fn toggle_bulk_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = KvTarget::of_tab(self.tab) else {
+    pub fn toggle_bulk_edit(&mut self, tab: RequestEditorTab, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = KvTarget::of_tab(tab) else {
             return;
         };
         self.expanded = None;
@@ -1824,16 +1826,6 @@ impl RequestEditor {
             .border_color(p.border)
             .children(tabs)
             .child(div().flex_1())
-            .when(KvTarget::of_tab(self.tab).is_some(), |d| {
-                let bulk = self.is_bulk_edit(self.tab);
-                d.child(
-                    Button::new("bulk-toggle", if bulk { "Таблица" } else { "Bulk Edit" })
-                        .ghost()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.toggle_bulk_edit(window, cx)
-                        })),
-                )
-            })
             .when_some(self.spec.spec_ref.as_ref(), |d, r| {
                 d.child(
                     Pill::new(format!("Linked to spec · {}", r.method.full_label()))
@@ -1847,6 +1839,37 @@ impl RequestEditor {
             )
     }
 
+    /// "Bulk Edit" / "Key-Value Edit" cell at the right of a table header (as in Postman).
+    fn bulk_toggle(&self, target: KvTarget, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = *cx.palette();
+        let bulk = self.bulk.iter().any(|b| b.target == target);
+        let tab = match target {
+            KvTarget::Params => RequestEditorTab::Params,
+            KvTarget::Headers => RequestEditorTab::Headers,
+            KvTarget::Form => RequestEditorTab::Body,
+        };
+        div()
+            .id("bulk-toggle")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .flex()
+            .items_center()
+            .px(px(12.))
+            .border_l_1()
+            .border_color(p.border)
+            .bg(p.bg)
+            .text_size(px(11.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(p.text)
+            .cursor_pointer()
+            .hover(|s| s.bg(p.surface_hi))
+            .on_click(cx.listener(move |this, _, window, cx| this.toggle_bulk_edit(tab, window, cx)))
+            .child(if bulk { "Key-Value Edit" } else { "Bulk Edit" })
+            .test_support()
+    }
+
     fn render_kv(&self, target: KvTarget, cx: &mut Context<Self>) -> AnyElement {
         let p = *cx.palette();
         if let Some(bulk) = self.bulk.iter().find(|b| b.target == target) {
@@ -1856,6 +1879,15 @@ impl RequestEditor {
                 .flex_col()
                 .flex_1()
                 .min_h_0()
+                .child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .h(px(30.))
+                        .border_b_1()
+                        .border_color(p.border)
+                        .child(self.bulk_toggle(target, cx)),
+                )
                 .child(
                     div()
                         .id("bulk-editor")
@@ -1889,9 +1921,10 @@ impl RequestEditor {
         let list = target.list(&self.spec);
         let is_multipart = target == KvTarget::Form && self.spec.body.kind == BodyKind::Multipart;
         let header = div()
+            .relative()
             .flex()
             .items_center()
-            .h(px(26.))
+            .h(px(30.))
             .px(px(14.))
             .gap(px(8.))
             .border_b_1()
@@ -1911,7 +1944,8 @@ impl RequestEditor {
                     .child("VALUE"),
             )
             .child(div().flex_1().child("DESCRIPTION"))
-            .child(div().w(px(22.)).flex_none());
+            .child(div().w(px(22.)).flex_none())
+            .child(self.bulk_toggle(target, cx));
 
         let issue_badge = |id: (&'static str, usize), issue: &HeaderIssue| {
             let color = if issue.is_error() { p.danger } else { p.warn };
