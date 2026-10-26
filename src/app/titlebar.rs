@@ -88,6 +88,13 @@ impl Workspace {
                             view.update(cx, |this, cx| this.set_env(ix, window, cx))
                                 .ok();
                         }
+                    })
+                    .on_create({
+                        let view = view.clone();
+                        move |window, cx| {
+                            view.update(cx, |this, cx| this.create_environment(window, cx))
+                                .ok();
+                        }
                     }),
             )
             .on_dismiss(move |_, cx| {

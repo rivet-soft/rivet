@@ -38,6 +38,9 @@ pub struct RunOutput {
     /// Variable changes made by both scripts, in order, to persist.
     pub env_changes: Vec<VarChange>,
     pub collection_changes: Vec<VarChange>,
+    /// `{{vars}}` defined in neither the environment nor the collection; they
+    /// were sent as empty strings (a warning for the user).
+    pub missing_vars: Vec<String>,
 }
 
 /// Applies `set`/`unset` changes to a variable list (enabled entries).
@@ -193,6 +196,7 @@ pub fn run(input: RunInput) -> RunOutput {
                 report,
                 env_changes,
                 collection_changes,
+                missing_vars: Vec::new(),
             };
         }
     }
@@ -202,10 +206,19 @@ pub fn run(input: RunInput) -> RunOutput {
     let resolved = match vars::resolve(&sent, scope.as_ref()) {
         Ok(r) => r,
         Err(e) => {
-            return RunOutput { sent, resolved_url: None, result: Err(e), report, env_changes, collection_changes };
+            return RunOutput {
+                sent,
+                resolved_url: None,
+                result: Err(e),
+                report,
+                env_changes,
+                collection_changes,
+                missing_vars: Vec::new(),
+            };
         }
     };
     let resolved_url = Some(resolved.url.clone());
+    let missing_vars = resolved.missing_vars.clone();
 
     // 3. HTTP.
     let result = match &sessions {
@@ -231,7 +244,7 @@ pub fn run(input: RunInput) -> RunOutput {
         }
     }
 
-    RunOutput { sent, resolved_url, result, report, env_changes, collection_changes }
+    RunOutput { sent, resolved_url, result, report, env_changes, collection_changes, missing_vars }
 }
 
 #[cfg(test)]

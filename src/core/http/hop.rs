@@ -266,7 +266,9 @@ pub(super) async fn run_hop(
         builder = builder.header(http::header::PROXY_AUTHORIZATION, auth);
     }
     for (k, v) in &headers {
-        builder = builder.header(k.as_str(), v.as_str());
+        // `from_bytes` also takes UTF-8 (obs-text); `vars::resolve` already
+        // rejected line breaks and control characters with a readable error.
+        builder = builder.header(k.as_str(), http::HeaderValue::from_bytes(v.as_bytes()).map_err(|e| invalid(format!("{k}: {e}")))?);
     }
     let payload = match hop.body {
         Some(body) if hop.method != Method::Head => Bytes::copy_from_slice(body),

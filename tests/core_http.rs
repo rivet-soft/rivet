@@ -513,7 +513,16 @@ fn vars_and_missing() {
     assert_eq!(req.missing_vars, vec!["user"]);
     let resp = execute(&req, &Settings::default(), &CancelToken::default()).unwrap();
     let json: Value = serde_json::from_slice(&resp.body).unwrap();
-    assert_eq!(json["headers"]["x-who"], "{{user}}");
+    // Undefined variables go out as empty strings, never as literal braces.
+    assert_eq!(json["headers"]["x-who"], "");
+
+    // UTF-8 header values are sent (obs-text) instead of failing in hyper.
+    let mut spec = RequestSpec::new("v", Method::Get, "{{baseUrl}}/echo");
+    spec.headers = vec![KeyValue::new("X-Name", "Иван")];
+    let req = resolve(&spec, Some(&env(&base))).unwrap();
+    let resp = execute(&req, &Settings::default(), &CancelToken::default()).unwrap();
+    let json: Value = serde_json::from_slice(&resp.body).unwrap();
+    assert_eq!(json["headers"]["x-name"], "Иван");
 
     // Unresolved host is an invalid URL.
     let spec = RequestSpec::new("v", Method::Get, "{{baseUrl}}/x");

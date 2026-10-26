@@ -4,6 +4,7 @@
 //! (`{{$timestamp}}`, `{{$uuid}}`, `{{$randomInt}}`), and [`resolve`], which turns a
 //! [`RequestSpec`] into a ready-to-send [`ResolvedRequest`].
 
+use super::header_check;
 use super::types::{Auth, BodyKind, Environment, RequestSpec, ResolvedRequest, SendError};
 
 /// Iterates `{{ ... }}` placeholders: yields `(start, end, trimmed_name)` byte ranges
@@ -30,6 +31,56 @@ fn placeholders(text: &str) -> Vec<(usize, usize, &str)> {
         }
         i = end;
     }
+    out
+}
+
+/// `text` with every `{{ ... }}` placeholder replaced by `with` (validating a
+/// template without knowing the variables).
+pub fn mask_placeholders(text: &str, with: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for (start, end, _) in placeholders(text) {
+        out.push_str(&text[last..start]);
+        out.push_str(with);
+        last = end;
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// First header HTTP can't carry, as [`SendError::InvalidHeader`]. A value that
+/// only breaks after substitution says so.
+fn check_headers(req: &RequestSpec, headers: &[(String, String)]) -> Result<(), SendError> {
+    for (name, value) in headers {
+        let issue = header_check::check_name(name, true)
+            .or_else(|| header_check::check_value(value))
+            .filter(|i| i.is_error());
+        if let Some(issue) = issue {
+            let templated = req
+                .headers
+                .iter()
+                .any(|h| h.key.trim() == name && (h.key.contains("{{") || h.value.contains("{{")));
+            let message = if templated {
+                format!("{} (после подстановки переменных)", issue.message)
+            } else {
+                issue.message
+            };
+            return Err(SendError::InvalidHeader { name: name.clone(), message });
+        }
+    }
+    Ok(())
+}
+
+/// Drops the `{{ ... }}` placeholders left after substitution (undefined or cyclic
+/// variables): they are sent as empty strings, never as literal braces.
+fn blank_placeholders(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for (start, end, _) in placeholders(text) {
+        out.push_str(&text[last..start]);
+        last = end;
+    }
+    out.push_str(&text[last..]);
     out
 }
 
@@ -316,27 +367,37 @@ fn disposition_value(value: &str) -> String {
 }
 
 /// Applies vars, params, headers, body and auth: produces an absolute URL with the
-/// query string, the final header list and the encoded body. Missing variables are
-/// collected in `missing_vars` (not an error); an empty or malformed URL is
-/// `SendError::InvalidUrl`.
+/// query string, the final header list and the encoded body. Missing variables
+/// become empty strings and are collected in `missing_vars` (a warning, not an
+/// error); a param or header whose name ends up empty is dropped. An empty or
+/// malformed URL is `SendError::InvalidUrl`.
 pub fn resolve(req: &RequestSpec, env: Option<&Environment>) -> Result<ResolvedRequest, SendError> {
-    let mut missing = Vec::new();
+    let (raw_url, url_missing) = substitute(&req.url, env);
+    let mut missing = url_missing.clone();
+    let raw_url = if url_missing.is_empty() { raw_url } else { blank_placeholders(&raw_url) };
     let mut sub = |text: &str| {
         let (s, m) = substitute(text, env);
+        if m.is_empty() {
+            return s;
+        }
         for name in m {
             push_unique(&mut missing, &name);
         }
-        s
+        blank_placeholders(&s)
     };
 
-    let raw_url = sub(&req.url);
-    let mut url = normalize_url(&raw_url)?;
+    // `{{baseUrl}}/x` without baseUrl: name the template, not the bare "/x".
+    let mut url = normalize_url(&raw_url).map_err(|e| match e {
+        SendError::InvalidUrl(_) if !url_missing.is_empty() => SendError::InvalidUrl(req.url.clone()),
+        other => other,
+    })?;
 
     let mut query: Vec<(String, String)> = req
         .params
         .iter()
         .filter(|p| p.enabled && !p.key.trim().is_empty())
         .map(|p| (sub(&p.key), sub(&p.value)))
+        .filter(|(k, _)| !k.is_empty())
         .collect();
 
     let mut headers: Vec<(String, String)> = req
@@ -344,6 +405,7 @@ pub fn resolve(req: &RequestSpec, env: Option<&Environment>) -> Result<ResolvedR
         .iter()
         .filter(|h| h.enabled && !h.key.trim().is_empty())
         .map(|h| (sub(h.key.trim()), sub(&h.value)))
+        .filter(|(k, _)| !k.trim().is_empty())
         .collect();
 
     let body = match req.body.kind {
@@ -484,6 +546,7 @@ pub fn resolve(req: &RequestSpec, env: Option<&Environment>) -> Result<ResolvedR
     }
 
     append_query(&mut url, &query);
+    check_headers(req, &headers)?;
 
     Ok(ResolvedRequest {
         method: req.method,
@@ -591,6 +654,54 @@ mod tests {
     }
 
     #[test]
+    fn undefined_vars_become_empty_strings() {
+        let mut r = RequestSpec::new("x", Method::Get, "{{baseUrl}}/u/{{uid}}");
+        r.params = vec![
+            KeyValue::new("{{test111}}", "12321"),
+            KeyValue::new("v", "{{v}}"),
+            KeyValue::new("pre{{nope}}", "1"),
+        ];
+        r.headers = vec![KeyValue::new("{{hdr}}", "x"), KeyValue::new("X-T", "a{{t}}b")];
+        let res = resolve(&r, Some(&env())).unwrap();
+        // Never sent as literal (percent-encoded) braces.
+        assert_eq!(res.url, "http://localhost:8080/u/?v=&pre=1");
+        assert!(!res.url.contains("%7B"));
+        assert_eq!(res.headers, vec![("X-T".to_string(), "ab".to_string())]);
+        assert_eq!(res.missing_vars, vec!["uid", "test111", "v", "nope", "hdr", "t"]);
+        // The URL error names the template when a variable emptied it.
+        let r = RequestSpec::new("x", Method::Get, "{{base}}/x");
+        assert_eq!(resolve(&r, None).unwrap_err(), SendError::InvalidUrl("{{base}}/x".into()));
+    }
+
+    #[test]
+    fn invalid_headers_are_refused_with_a_readable_error() {
+        let mut r = RequestSpec::new("x", Method::Get, "http://h/");
+        r.headers = vec![KeyValue::new("X Token", "1")];
+        assert_eq!(
+            resolve(&r, None).unwrap_err(),
+            SendError::InvalidHeader {
+                name: "X Token".into(),
+                message: "В имени заголовка не может быть пробелов".into()
+            }
+        );
+        r.headers = vec![KeyValue::new("Cookie", "a=1\nb=2")];
+        let err = resolve(&r, None).unwrap_err();
+        assert_eq!(err.to_string(), "Header «Cookie»: В заголовке не может быть перевода строки");
+        // Broken only after substitution: the message says so.
+        let mut e = env();
+        e.vars.push(KeyValue::new("multi", "a\r\nb"));
+        r.headers = vec![KeyValue::new("X-M", "{{multi}}")];
+        let SendError::InvalidHeader { message, .. } = resolve(&r, Some(&e)).unwrap_err() else {
+            panic!()
+        };
+        assert!(message.ends_with("(после подстановки переменных)"), "{message}");
+        // Warnings (edge blanks, UTF-8) don't block.
+        r.headers = vec![KeyValue::new("X-Name", " Иван ")];
+        assert!(resolve(&r, None).is_ok());
+        assert_eq!(mask_placeholders("{{a}}-{{ b }}x", "v"), "v-vx");
+    }
+
+    #[test]
     fn resolve_body_and_auth() {
         let mut r = RequestSpec::new("x", Method::Post, "{{baseUrl}}/o");
         r.body = Body::json("{\"id\": {{id}}, \"m\": \"{{missing}}\"}");
@@ -598,7 +709,7 @@ mod tests {
         let res = resolve(&r, Some(&env())).unwrap();
         assert_eq!(
             res.body.as_deref(),
-            Some(&b"{\"id\": 42, \"m\": \"{{missing}}\"}"[..])
+            Some(&b"{\"id\": 42, \"m\": \"\"}"[..])
         );
         assert_eq!(res.missing_vars, vec!["missing"]);
         assert!(

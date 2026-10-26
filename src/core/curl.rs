@@ -9,49 +9,175 @@ use super::types::{
 };
 use super::vars::decode_component;
 
+/// Windows `cmd.exe` syntax ("Copy as cURL (cmd)"): `^` escapes the next
+/// character and `^` at the end of a line continues the command. Turns it into
+/// the POSIX form `tokenize` understands (`^\^"` → `\"`).
+fn looks_like_cmd(cmd: &str) -> bool {
+    cmd.contains("^\"") || cmd.lines().any(|l| l.trim_end().ends_with('^'))
+}
+
+fn unescape_cmd(cmd: &str) -> String {
+    let mut out = String::with_capacity(cmd.len());
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '^' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('\r') => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push(' ');
+            }
+            Some('\n') => out.push(' '),
+            Some(n) => out.push(n),
+            None => {}
+        }
+    }
+    out
+}
+
+fn is_blank(c: char) -> bool {
+    c == ' ' || c == '\t'
+}
+
+/// Pushes the character a `$'..'` escape stands for; `chars[*i]` is the char after `\`.
+fn ansi_c_escape(chars: &[char], i: &mut usize, cur: &mut String) -> Option<()> {
+    let c = *chars.get(*i)?;
+    *i += 1;
+    let hex = |i: &mut usize, max: usize| -> Option<char> {
+        let start = *i;
+        while *i < chars.len() && *i - start < max && chars[*i].is_ascii_hexdigit() {
+            *i += 1;
+        }
+        let digits: String = chars[start..*i].iter().collect();
+        u32::from_str_radix(&digits, 16).ok().and_then(char::from_u32)
+    };
+    let ch = match c {
+        'n' => '\n',
+        't' => '\t',
+        'r' => '\r',
+        'a' => '\u{7}',
+        'b' => '\u{8}',
+        'e' | 'E' => '\u{1b}',
+        'f' => '\u{c}',
+        'v' => '\u{b}',
+        '0' => '\0',
+        'x' => match hex(i, 2) {
+            Some(ch) => ch,
+            None => {
+                cur.push_str("\\x");
+                return Some(());
+            }
+        },
+        'u' | 'U' => match hex(i, if c == 'u' { 4 } else { 8 }) {
+            Some(ch) => ch,
+            None => {
+                cur.push('\\');
+                cur.push(c);
+                return Some(());
+            }
+        },
+        other => other,
+    };
+    cur.push(ch);
+    Some(())
+}
+
 /// Splits a shell command line into words (single/double quotes, `$'..'`,
 /// backslash escapes, backslash-newline continuations). `None` on unbalanced quotes.
+///
+/// Continuations also survive a paste into a single-line field, which drops the
+/// newlines: `\` followed by blanks that start a new word is a separator, not an
+/// escaped space. A PowerShell backtick before a newline continues the line too.
 fn tokenize(cmd: &str) -> Option<Vec<String>> {
+    let unescaped;
+    let cmd = if looks_like_cmd(cmd) {
+        unescaped = unescape_cmd(cmd);
+        unescaped.as_str()
+    } else {
+        cmd
+    };
+    let chars: Vec<char> = cmd.chars().collect();
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut in_word = false;
-    let mut chars = cmd.chars().peekable();
-    while let Some(c) = chars.next() {
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        i += 1;
         match c {
-            '\\' => match chars.next() {
-                Some('\n') => {}
-                Some('\r') => {
-                    if chars.peek() == Some(&'\n') {
-                        chars.next();
+            '\\' => {
+                // `\` + blanks + newline/end: a continuation with trailing spaces.
+                let mut j = i;
+                while j < chars.len() && is_blank(chars[j]) {
+                    j += 1;
+                }
+                let blanks = j - i;
+                match chars.get(j) {
+                    Some('\n') | Some('\r') | None if blanks > 0 || j < chars.len() => {
+                        i = j + 1;
+                        if chars.get(j) == Some(&'\r') && chars.get(i) == Some(&'\n') {
+                            i += 1;
+                        }
                     }
-                }
-                Some(n) => {
-                    cur.push(n);
-                    in_word = true;
-                }
-                None => {}
-            },
-            '\'' => {
-                in_word = true;
-                loop {
-                    match chars.next()? {
-                        '\'' => break,
-                        ch => cur.push(ch),
+                    None => {}
+                    // A dropped newline: `\` then indentation before the next word.
+                    _ if blanks > 0 && (!in_word || blanks > 1) => {
+                        i = j;
+                        if in_word {
+                            out.push(std::mem::take(&mut cur));
+                            in_word = false;
+                        }
+                    }
+                    Some(_) => {
+                        cur.push(chars[i]);
+                        in_word = true;
+                        i += 1;
                     }
                 }
             }
-            '$' if chars.peek() == Some(&'\'') => {
-                chars.next();
+            '`' if !in_word => {
+                let mut j = i;
+                while j < chars.len() && is_blank(chars[j]) {
+                    j += 1;
+                }
+                match chars.get(j) {
+                    // PowerShell continuation (or its newline dropped by a paste).
+                    Some('\n') | Some('\r') | None => i = j,
+                    _ if j > i => i = j,
+                    _ => {
+                        cur.push(c);
+                        in_word = true;
+                    }
+                }
+            }
+            '\'' => {
                 in_word = true;
                 loop {
-                    match chars.next()? {
+                    match *chars.get(i)? {
+                        '\'' => {
+                            i += 1;
+                            break;
+                        }
+                        ch => {
+                            cur.push(ch);
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            '$' if chars.get(i) == Some(&'\'') => {
+                i += 1;
+                in_word = true;
+                loop {
+                    let ch = *chars.get(i)?;
+                    i += 1;
+                    match ch {
                         '\'' => break,
-                        '\\' => match chars.next()? {
-                            'n' => cur.push('\n'),
-                            't' => cur.push('\t'),
-                            'r' => cur.push('\r'),
-                            other => cur.push(other),
-                        },
+                        '\\' => ansi_c_escape(&chars, &mut i, &mut cur)?,
                         ch => cur.push(ch),
                     }
                 }
@@ -59,16 +185,23 @@ fn tokenize(cmd: &str) -> Option<Vec<String>> {
             '"' => {
                 in_word = true;
                 loop {
-                    match chars.next()? {
+                    let ch = *chars.get(i)?;
+                    i += 1;
+                    match ch {
                         '"' => break,
-                        '\\' => match chars.next()? {
-                            '\n' => {}
-                            ch @ ('"' | '\\' | '$' | '`') => cur.push(ch),
-                            ch => {
-                                cur.push('\\');
-                                cur.push(ch);
+                        '\\' => {
+                            let next = *chars.get(i)?;
+                            i += 1;
+                            match next {
+                                '\n' => {}
+                                '\r' if chars.get(i) == Some(&'\n') => i += 1,
+                                ch @ ('"' | '\\' | '$' | '`') => cur.push(ch),
+                                ch => {
+                                    cur.push('\\');
+                                    cur.push(ch);
+                                }
                             }
-                        },
+                        }
                         ch => cur.push(ch),
                     }
                 }
@@ -188,10 +321,40 @@ fn name_from_url(url: &str) -> String {
     }
 }
 
+/// Cleans up a command copied from a web page or docs: a leading shell prompt
+/// (`$ curl …`), non-breaking / typographic spaces and “smart” quotes.
+fn normalize_pasted(cmd: &str) -> String {
+    let cmd: String = cmd
+        .chars()
+        .map(|c| match c {
+            '\u{a0}' | '\u{2007}' | '\u{2009}' | '\u{202f}' | '\u{3000}' => ' ',
+            '\u{201c}' | '\u{201d}' | '\u{201e}' => '"',
+            '\u{2018}' | '\u{2019}' => '\'',
+            '\u{feff}' | '\u{200b}' => ' ',
+            c => c,
+        })
+        .collect();
+    let trimmed = cmd.trim();
+    let trimmed = ["$ ", "% ", "> ", "# "]
+        .iter()
+        .find_map(|p| trimmed.strip_prefix(p))
+        .unwrap_or(trimmed);
+    trimmed.trim_start().to_string()
+}
+
+/// Whether pasted text is a curl command (`curl …`, `$ curl …`, `curl.exe …`).
+pub fn looks_like_curl(text: &str) -> bool {
+    let text = normalize_pasted(text);
+    let first = text.split(|c: char| c.is_whitespace() || c == '\\').next().unwrap_or("");
+    let prog = first.rsplit('/').next().unwrap_or(first);
+    !first.contains("://")
+        && (prog.eq_ignore_ascii_case("curl") || prog.eq_ignore_ascii_case("curl.exe"))
+}
+
 /// Parses a `curl ...` command into a request. `None` if it isn't a curl command
 /// or has no URL.
 pub fn parse_curl(cmd: &str) -> Option<RequestSpec> {
-    let words = tokenize(cmd.trim())?;
+    let words = tokenize(&normalize_pasted(cmd))?;
     let mut it = words.into_iter();
     let first = it.next()?;
     let prog = first.rsplit('/').next().unwrap_or(&first);
@@ -472,6 +635,62 @@ mod tests {
         let t = tokenize("curl 'a b' \"c \\\"d\\\"\" e\\ f \\\n  g $'x\\ny'").unwrap();
         assert_eq!(t, vec!["curl", "a b", "c \"d\"", "e f", "g", "x\ny"]);
         assert!(tokenize("curl 'oops").is_none());
+    }
+
+    #[test]
+    fn continuations_and_escapes() {
+        let words = vec!["curl", "-X", "POST", "https://h/x", "-H", "A: b"];
+        // Classic, CRLF and trailing blanks after the backslash.
+        for cmd in [
+            "curl -X POST \\\n  'https://h/x' \\\n  -H 'A: b'",
+            "curl -X POST \\\r\n  'https://h/x' \\\r\n  -H 'A: b'",
+            "curl -X POST \\  \n  'https://h/x' \\\t\n  -H 'A: b' \\",
+            // Newlines dropped by a single-line input.
+            "curl -X POST \\  'https://h/x' \\  -H 'A: b'",
+            "curl -X POST\\  'https://h/x'\\  -H 'A: b'",
+            // PowerShell backtick continuation.
+            "curl -X POST `\n  'https://h/x' `\n  -H 'A: b'",
+            // Windows cmd: `^` continuation and `^"` quoting.
+            "curl -X POST ^\n  ^\"https://h/x^\" ^\r\n  -H ^\"A: b^\"",
+        ] {
+            assert_eq!(tokenize(cmd).unwrap(), words, "{cmd:?}");
+        }
+        // Escaped characters outside quotes and in $'..'.
+        let t = tokenize(r#"curl a\$b \"q\" x\\y $'\x41\u00e9\'z'"#).unwrap();
+        assert_eq!(t, vec!["curl", "a$b", "\"q\"", "x\\y", "Aé'z"]);
+        // cmd JSON body: `^\^"` is an escaped quote inside a quoted word.
+        let s = parse_curl(
+            "curl ^\"https://h/x^\" ^\n  --data-raw ^\"^{^\\^\"a^\\^\":1^}^\"",
+        )
+        .unwrap();
+        assert_eq!(s.body, Body::json("{\"a\":1}"));
+    }
+
+    #[test]
+    fn pasted_from_web_pages() {
+        let cmd = "$ curl -L \\\n  -H \u{201c}Accept: application/json\u{201d} \\\n\u{a0}\u{a0}https://api.github.com/repos/o/r";
+        assert!(looks_like_curl(cmd));
+        let s = parse_curl(cmd).unwrap();
+        assert_eq!(s.url, "https://api.github.com/repos/o/r");
+        assert_eq!(s.headers, vec![KeyValue::new("Accept", "application/json")]);
+        assert!(looks_like_curl("curl\\\n  https://x"));
+        assert!(!looks_like_curl("curly http://x"));
+        assert!(!looks_like_curl("https://x/curl"));
+    }
+
+    #[test]
+    fn parse_multiline_after_newlines_dropped() {
+        let raw = "curl 'https://api.x.com/v1/users?limit=5' \\\n  -H 'Accept: application/json' \\\n  -H 'Authorization: Bearer t0k' \\\n  --data-raw '{\"a\":1}'";
+        let flat = raw.replace('\n', "");
+        for cmd in [raw.to_string(), flat] {
+            let s = parse_curl(&cmd).unwrap();
+            assert_eq!(s.url, "https://api.x.com/v1/users", "{cmd:?}");
+            assert_eq!(s.params, vec![KeyValue::new("limit", "5")]);
+            assert_eq!(s.headers, vec![KeyValue::new("Accept", "application/json")]);
+            assert_eq!(s.auth, Auth::Bearer { token: "t0k".into() });
+            assert_eq!(s.body, Body::json("{\"a\":1}"));
+            assert_eq!(s.method, Method::Post);
+        }
     }
 
     #[test]

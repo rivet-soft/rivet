@@ -702,6 +702,13 @@ impl Server {
                 true
             }
         };
+        if !out.missing_vars.is_empty() {
+            value["undefined_variables"] = json!(out.missing_vars);
+            value["warning"] = json!(format!(
+                "These {{{{variables}}}} are defined in neither the environment nor the collection and were sent as empty strings: {}",
+                out.missing_vars.join(", ")
+            ));
+        }
         value["scripts"] = output::script_report(&out.report);
         value["variable_changes"] = json!({
             "environment": output::var_changes(&out.env_changes, reveal),

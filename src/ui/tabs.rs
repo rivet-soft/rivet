@@ -23,6 +23,35 @@ pub struct Tab {
     on_menu_click: Option<ClickHandler>,
     on_context_menu: Option<Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>>,
     on_menu_dismiss: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    drag: Option<TabDrag>,
+    on_drop: Option<Rc<dyn Fn(&TabDrag, &mut Window, &mut App)>>,
+}
+
+/// Drag payload of a tab being reordered: its index in the bar.
+#[derive(Clone)]
+pub struct TabDrag {
+    pub index: usize,
+    pub label: SharedString,
+}
+
+struct TabDragPreview {
+    label: SharedString,
+}
+
+impl Render for TabDragPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = *cx.palette();
+        div()
+            .px(px(12.))
+            .py(px(7.))
+            .rounded(px(6.))
+            .bg(p.surface_hi)
+            .border_1()
+            .border_color(p.accent)
+            .text_size(px(12.))
+            .text_color(p.text)
+            .child(self.label.clone())
+    }
 }
 
 impl Tab {
@@ -41,7 +70,21 @@ impl Tab {
             on_menu_click: None,
             on_context_menu: None,
             on_menu_dismiss: None,
+            drag: None,
+            on_drop: None,
         }
+    }
+
+    /// Makes the tab draggable as tab `index` (reordering).
+    pub fn draggable(mut self, index: usize) -> Self {
+        self.drag = Some(TabDrag { index, label: self.label.clone() });
+        self
+    }
+
+    /// Another tab dropped onto this one.
+    pub fn on_tab_drop(mut self, f: impl Fn(&TabDrag, &mut Window, &mut App) + 'static) -> Self {
+        self.on_drop = Some(Rc::new(f));
+        self
     }
 
     pub fn method(mut self, m: Method) -> Self {
@@ -135,6 +178,15 @@ impl RenderOnce for Tab {
             .when(!self.active, |s| s.hover(|s| s.bg(p.surface_hi)))
             .when_some(self.on_click, |s, f| {
                 s.on_click(move |e, w, cx| f(e, w, cx))
+            })
+            .when_some(self.drag, |s, drag| {
+                s.on_drag(drag, |drag, _, _, cx| {
+                    cx.new(|_| TabDragPreview { label: drag.label.clone() })
+                })
+            })
+            .when_some(self.on_drop, |s, f| {
+                s.drag_over::<TabDrag>(move |style, _, _, _| style.bg(p.accent.opacity(0.17)))
+                    .on_drop(move |drag: &TabDrag, w, cx| f(drag, w, cx))
             })
             .when_some(self.on_context_menu, |s, f| {
                 s.on_mouse_down(MouseButton::Right, move |event, window, cx| {

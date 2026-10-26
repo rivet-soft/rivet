@@ -33,7 +33,7 @@ pub use splitter::{
     HorizontalPaneSplitter, PANE_SPLITTER_HEIGHT, PANE_SPLITTER_WIDTH, PaneSplitter,
 };
 pub use tab_actions::{TabAction, TabActionsMenu};
-pub use tabs::{Tab, TabBar};
+pub use tabs::{Tab, TabBar, TabDrag};
 pub use tree::{SectionLabel, TreeRow};
 
 use std::rc::Rc;

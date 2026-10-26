@@ -197,6 +197,28 @@ impl Workspace {
                 vec![("rename", "Переименовать"), ("delete", "Удалить запрос")]
             }
         };
+        let trigger = div()
+            .id(format!("sidebar-menu-trigger-{id}"))
+            .w(px(22.))
+            .h(px(22.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.))
+            .cursor_pointer()
+            .child("···")
+            .on_click(cx.listener({
+                let trigger_target = target.clone();
+                move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.toggle_sidebar_menu(trigger_target.clone(), cx);
+                }
+            }))
+            .test_support();
+        // Rows are on screen for every request: build the menu only when open.
+        if !open {
+            return trigger.into_any_element();
+        }
         let mut pop = Popover::new(format!("sidebar-popover-{id}"))
             .open(open)
             .width(190.)
@@ -209,26 +231,8 @@ impl Workspace {
                     });
                 }
             })
-            .trigger(
-                div()
-                    .id(format!("sidebar-menu-trigger-{id}"))
-                    .w(px(22.))
-                    .h(px(22.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .child("···")
-                    .on_click(cx.listener({
-                        let trigger_target = target.clone();
-                        move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.toggle_sidebar_menu(trigger_target.clone(), cx);
-                        }
-                    }))
-                    .test_support(),
-            );
+            .trigger(trigger);
+
         for (action, label) in rows {
             let target = target.clone();
             let button_id: ElementId = match (&target, action, collection_ix) {
@@ -277,6 +281,31 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// Everything the sidebar draws from. The sidebar is a cached view (a large
+    /// collection tree costs a lot to lay out); it re-renders only when this
+    /// changes, not on every keystroke in the request editor.
+    pub(super) fn sidebar_key(&self, cx: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.rail as u8).hash(&mut h);
+        self.sidebar_width.to_bits().hash(&mut h);
+        self.filter.hash(&mut h);
+        self.collection_menu.hash(&mut h);
+        self.collection_delete_confirm.hash(&mut h);
+        let mut collapsed: Vec<&String> = self.collapsed.iter().collect();
+        collapsed.sort();
+        collapsed.hash(&mut h);
+        self.active().map(|r| &r.id).hash(&mut h);
+        (cx.palette().mode as u8).hash(&mut h);
+        for c in &self.project.collections {
+            (&c.id, &c.name, &c.folders, c.source.is_some()).hash(&mut h);
+            for r in &c.requests {
+                (&r.id, &r.name, r.method as u8, &r.folder, &r.url).hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         match self.rail {
             RailMode::History => self.render_history_sidebar(cx),
@@ -302,7 +331,7 @@ impl Workspace {
 
     fn render_collections(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = *cx.palette();
-        let active = self.active().cloned();
+        let active_id = self.active().map(|r| r.id.clone());
 
         let mut tree = div()
             .id("collection-tree")
@@ -558,7 +587,7 @@ impl Workspace {
                     }
                 }
                 for (ri, r) in requests {
-                    let selected = active.as_ref().is_some_and(|a| a.id == r.id);
+                    let selected = active_id.as_deref() == Some(r.id.as_str());
                     let drag = SavedRequestDrag {
                         request_id: r.id.clone(),
                         label: r.name.clone(),
@@ -649,5 +678,20 @@ impl Workspace {
             )
             .child(tree)
             .into_any_element()
+    }
+}
+
+/// Cached host of the collections / history sidebar: renders
+/// [`Workspace::render_sidebar`], re-rendered only when notified (see
+/// [`Workspace::sidebar_key`]).
+pub struct SidebarView {
+    pub(super) workspace: WeakEntity<Workspace>,
+}
+
+impl Render for SidebarView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.workspace
+            .update(cx, |ws, cx| ws.render_sidebar(cx))
+            .unwrap_or_else(|_| div().into_any_element())
     }
 }

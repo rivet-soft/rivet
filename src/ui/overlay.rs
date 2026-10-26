@@ -410,6 +410,7 @@ pub struct EnvPopover {
     envs: Vec<(SharedString, SharedString, Hsla)>,
     active: Option<usize>,
     on_select: Option<SelectHandler>,
+    on_create: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
 }
 
 impl EnvPopover {
@@ -431,6 +432,7 @@ impl EnvPopover {
                 .collect(),
             active: None,
             on_select: None,
+            on_create: None,
         }
     }
 
@@ -443,6 +445,12 @@ impl EnvPopover {
         self.on_select = Some(Rc::new(f));
         self
     }
+
+    /// Adds an always-visible "Создать окружение" row (`env-create`) at the bottom.
+    pub fn on_create(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_create = Some(Rc::new(f));
+        self
+    }
 }
 
 impl RenderOnce for EnvPopover {
@@ -450,6 +458,25 @@ impl RenderOnce for EnvPopover {
         let p = *cx.palette();
         let on_select = self.on_select;
         let active = self.active;
+        let has_envs = !self.envs.is_empty();
+        let create = self.on_create.map(|f| {
+            div()
+                .id("env-create")
+                .flex()
+                .items_center()
+                .gap(px(9.))
+                .px(px(8.))
+                .py(px(6.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .text_color(p.accent)
+                .hover(|s| s.bg(p.surface_hi))
+                .on_click(move |_, w, cx| f(w, cx))
+                .child(icon(IconName::Plus, 13., p.accent))
+                .child("Создать окружение")
+                .test_support()
+        });
 
         div()
             .id(self.id)
@@ -508,6 +535,22 @@ impl RenderOnce for EnvPopover {
                             .test_support()
                     }),
             )
+            .when(!has_envs && create.is_some(), |s| {
+                s.child(
+                    div()
+                        .px(px(8.))
+                        .py(px(6.))
+                        .text_size(px(12.))
+                        .text_color(p.text_dim)
+                        .child("Окружений пока нет"),
+                )
+            })
+            .when_some(create, |s, row| {
+                s.when(has_envs, |s| {
+                    s.child(div().my(px(3.)).h(px(1.)).bg(p.border))
+                })
+                .child(row)
+            })
     }
 }
 

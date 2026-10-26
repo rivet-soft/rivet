@@ -2261,6 +2261,11 @@ impl ResponseView {
                 "Не удалось прочитать файл".to_string(),
                 format!("{path}: {message}"),
             ),
+            SendError::InvalidHeader { name, message } => (
+                "INVALID_HEADER".to_string(),
+                format!("Недопустимый заголовок «{name}»"),
+                format!("{message}. Запрос не отправлен: исправьте заголовок во вкладке Headers."),
+            ),
             SendError::Cancelled => (
                 "CANCELLED".to_string(),
                 "Запрос отменён".to_string(),

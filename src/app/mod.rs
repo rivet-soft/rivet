@@ -188,6 +188,12 @@ fn host_of(url: &str) -> String {
         .to_string()
 }
 
+/// Toast after a send with undefined `{{vars}}` (they went out empty).
+fn missing_vars_notice(names: &[String]) -> String {
+    let list: Vec<String> = names.iter().map(|n| format!("{{{{{n}}}}}")).collect();
+    format!("Не определены {} — отправлены пустой строкой", list.join(", "))
+}
+
 fn request_name_from_url(url: &str) -> String {
     let path = url
         .split(['?', '#'])
@@ -241,7 +247,7 @@ impl RequestTab {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum SidebarMenu {
     Collection(String),
     Folder(String, String),
@@ -267,6 +273,9 @@ pub struct Workspace {
     pub sidebar_width: f32,
     /// Drag in progress: (cursor x at start, width at start).
     sidebar_drag: Option<(f32, f32)>,
+    sidebar_view: Entity<sidebar::SidebarView>,
+    /// [`Self::sidebar_key`] the cached sidebar was last rendered for.
+    sidebar_key: Option<u64>,
     request_split_dragging: bool,
     request_split_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub tabs: Vec<RequestTab>,
@@ -486,6 +495,11 @@ impl Workspace {
             request_split_ratio: 0.5,
             sidebar_width: project_sidebar_width,
             sidebar_drag: None,
+            sidebar_view: {
+                let workspace = cx.entity().downgrade();
+                cx.new(|_| sidebar::SidebarView { workspace })
+            },
+            sidebar_key: None,
             request_split_dragging: false,
             request_split_bounds: Rc::new(Cell::new(None)),
             tabs,
@@ -875,6 +889,26 @@ impl Workspace {
         });
     }
 
+    /// Drag & drop in the tab bar: moves tab `from` to position `to`. The
+    /// active tab stays active; the order is saved with `open_tabs`.
+    pub fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let ids: Vec<String> = self.tabs.iter().map(|t| t.request.id.clone()).collect();
+        let position = |ix: Option<usize>, tabs: &[RequestTab]| {
+            ix.and_then(|ix| ids.get(ix))
+                .and_then(|id| tabs.iter().position(|t| &t.request.id == id))
+        };
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active_tab = position(self.active_tab, &self.tabs);
+        self.close_confirm = position(self.close_confirm, &self.tabs);
+        self.tab_menu = None;
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
     fn set_active(&mut self, ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         self.active_tab = ix;
         self.sync_active(window, cx);
@@ -1061,6 +1095,25 @@ impl Workspace {
         }
     }
 
+    /// Replaces the active request with a pasted `curl ...` command. The URL
+    /// field calls this with the raw clipboard text first (a single-line input
+    /// drops the newlines of `\`-continued commands) and again on change.
+    pub fn import_curl(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !curl::looks_like_curl(text) {
+            return false;
+        }
+        let Some(mut parsed) = curl::parse_curl(text) else {
+            return false;
+        };
+        if let Some(tab) = self.active_mut() {
+            parsed.id = tab.request.id.clone();
+            tab.request = parsed;
+        }
+        self.sync_active(window, cx);
+        self.notify_user("cURL импортирован", cx);
+        true
+    }
+
     fn on_url_event(
         &mut self,
         state: &Entity<InputState>,
@@ -1072,16 +1125,8 @@ impl Workspace {
             InputEvent::Change => {
                 let value = state.read(cx).value();
                 // Pasting a cURL command turns it into a request.
-                if value.trim_start().starts_with("curl ") {
-                    if let Some(mut parsed) = curl::parse_curl(&value) {
-                        if let Some(tab) = self.active_mut() {
-                            parsed.id = tab.request.id.clone();
-                            tab.request = parsed;
-                        }
-                        self.sync_active(window, cx);
-                        self.notify_user("cURL импортирован", cx);
-                        return;
-                    }
+                if self.import_curl(&value, window, cx) {
+                    return;
                 }
                 state.update(cx, |s, cx| tokenize_vars(s, window, cx));
                 let value = state.read(cx).value().to_string();
@@ -1279,7 +1324,10 @@ impl Workspace {
 
     fn finish(&mut self, request_id: &str, output: runner::RunOutput, cx: &mut Context<Self>) {
         self.apply_script_changes(&output, cx);
-        let runner::RunOutput { sent, resolved_url, result, report, .. } = output;
+        let runner::RunOutput { sent, resolved_url, result, report, missing_vars, .. } = output;
+        if !missing_vars.is_empty() {
+            self.notify_user(missing_vars_notice(&missing_vars), cx);
+        }
         let (status, duration_ms) = match &result {
             Ok(r) => (Some(r.status), Some(r.timings.total.as_millis() as u64)),
             Err(_) => (None, None),
@@ -2251,6 +2299,20 @@ impl Workspace {
 
     /// Switching rails can unmount the focused input (sidebar search), so
     /// focus goes back to the workspace to keep shortcuts working.
+    /// "Создать окружение" in the titlebar picker: adds an environment and opens
+    /// it on the Environments page.
+    pub fn create_environment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.env_menu_open = false;
+        let envs = self.project.environments.clone();
+        let active = self.project.active_env;
+        self.env_panel_stale = false;
+        self.env_panel.update(cx, |p, cx| {
+            p.set_envs(envs, active, window, cx);
+            p.add_env(window, cx);
+        });
+        self.set_rail(RailMode::Environments, window, cx);
+    }
+
     pub fn set_rail(&mut self, mode: RailMode, window: &mut Window, cx: &mut Context<Self>) {
         if mode == RailMode::Settings {
             let settings = self.project.settings.clone();
@@ -2270,6 +2332,11 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if window.focused(cx).is_none() {
             window.focus(&self.focus, cx);
+        }
+        let sidebar_key = self.sidebar_key(cx);
+        if self.sidebar_key != Some(sidebar_key) {
+            self.sidebar_key = Some(sidebar_key);
+            self.sidebar_view.update(cx, |_, cx| cx.notify());
         }
         if std::mem::take(&mut self.env_panel_stale) {
             let envs = self.project.environments.clone();
@@ -2437,7 +2504,14 @@ impl Render for Workspace {
                             && self.rail != RailMode::Collections
                             && self.rail != RailMode::Settings,
                         |d| {
-                            d.child(self.render_sidebar(cx)).child(
+                            d.child(
+                                self.sidebar_view.clone().cached(
+                                    StyleRefinement::default()
+                                        .flex_none()
+                                        .w(px(self.sidebar_width)),
+                                ),
+                            )
+                            .child(
                                 crate::ui::PaneSplitter::new("sidebar-splitter")
                                     .active(self.sidebar_drag.is_some())
                                     .on_drag_start(cx.listener(|this, event, _, cx| {

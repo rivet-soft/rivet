@@ -543,6 +543,12 @@ pub enum SendError {
         message: String,
         line: Option<u32>,
     },
+    /// A header name/value HTTP forbids (line break, control char, space in
+    /// the name…); the request was not sent.
+    InvalidHeader {
+        name: String,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for SendError {
@@ -555,6 +561,7 @@ impl std::fmt::Display for SendError {
             SendError::Cancelled => write!(f, "Cancelled"),
             SendError::Script { message, line: Some(l) } => write!(f, "Pre-request script, line {l}: {message}"),
             SendError::Script { message, line: None } => write!(f, "Pre-request script: {message}"),
+            SendError::InvalidHeader { name, message } => write!(f, "Header «{name}»: {message}"),
         }
     }
 }

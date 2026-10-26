@@ -567,3 +567,191 @@ fn set_spec_loads_scripts(cx: &mut TestAppContext) {
         assert_eq!(v.spec().scripts.post_response, "console.log(2);//");
     });
 }
+
+#[gpui_kit::test]
+fn bulk_edit_round_trips_params_and_headers(cx: &mut TestAppContext) {
+    let mut spec = sample();
+    spec.params[0].description = "page size".into();
+    let (view, window, events) = open(cx, spec);
+    window.update(|w, cx| {
+        w.click("bulk-toggle", cx);
+        w.render_frame(cx);
+        assert!(w.within("req-params").try_find("bulk-editor").is_some());
+        assert!(w.within("req-params").try_find(("key", 0usize)).is_none());
+    });
+    view.read_with(window, |v, cx| {
+        assert!(v.is_bulk_edit(RequestEditorTab::Params));
+        assert!(!v.is_bulk_edit(RequestEditorTab::Headers));
+        assert_eq!(
+            v.bulk_text(RequestEditorTab::Params, cx).as_deref(),
+            Some("limit:10\n//page:1")
+        );
+    });
+    assert!(events.borrow().is_empty(), "opening bulk edit is not a change");
+
+    // Replace the text (Postman format): order, `//` = disabled.
+    window.update(|w, cx| {
+        w.click("bulk-editor", cx);
+        w.press("cmd-a", cx);
+        w.input(
+            "access_token:{{access_token}}\nv:{{v}}\n//restore_sid:\nnew_password:\nlimit:20",
+            cx,
+        );
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| {
+        let got: Vec<(bool, &str, &str)> = v
+            .spec()
+            .params
+            .iter()
+            .map(|kv| (kv.enabled, kv.key.as_str(), kv.value.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (true, "access_token", "{{access_token}}"),
+                (true, "v", "{{v}}"),
+                (false, "restore_sid", ""),
+                (true, "new_password", ""),
+                (true, "limit", "20"),
+            ]
+        );
+        // The description survives text edits of the same key.
+        assert_eq!(v.spec().params[4].description, "page size");
+    });
+    assert!(events.borrow().contains(&RequestEditorEvent::Changed));
+
+    // Back to the table: rows rebuilt from the edited list (+ draft row).
+    window.update(|w, cx| {
+        w.click("bulk-toggle", cx);
+        w.render_frame(cx);
+        assert!(w.within("req-params").try_find("bulk-editor").is_none());
+        assert!(w.within("req-params").try_find(("key", 4usize)).is_some());
+        assert!(w.within("req-params").try_find(("key", 5usize)).is_some());
+        assert!(w.within("req-params").try_find(("key", 6usize)).is_none());
+    });
+    view.read_with(window, |v, _| {
+        assert!(!v.is_bulk_edit(RequestEditorTab::Params));
+        assert_eq!(v.count(RequestEditorTab::Params), 4);
+    });
+
+    // Headers have their own toggle state.
+    window.update(|w, cx| {
+        w.click(("subtab", RequestEditorTab::Headers as usize), cx);
+        w.render_frame(cx);
+        w.click("bulk-toggle", cx);
+        w.render_frame(cx);
+        assert!(w.within("req-headers").try_find("bulk-editor").is_some());
+    });
+    view.read_with(window, |v, cx| {
+        assert_eq!(
+            v.bulk_text(RequestEditorTab::Headers, cx).as_deref(),
+            Some("Accept:application/json")
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn invalid_headers_are_highlighted_with_a_hint(cx: &mut TestAppContext) {
+    let mut spec = sample();
+    spec.headers = vec![
+        KeyValue::new("Accept", "application/json"),
+        KeyValue::new("X Token", "1"),
+        KeyValue::new("Cookie", "a=1\nb=2"),
+        KeyValue::new("X-Pad", " v "),
+        KeyValue::new("{{hdr}}", "{{value}}"),
+    ];
+    let (view, window, _) = open(cx, spec);
+    window.update(|w, cx| {
+        w.click(("subtab", RequestEditorTab::Headers as usize), cx);
+        w.render_frame(cx);
+        let mut table = w.within("req-headers");
+        assert!(table.try_find(("key-issue", 0usize)).is_none());
+        assert!(table.try_find(("value-issue", 0usize)).is_none());
+        assert!(table.try_find(("key-issue", 1usize)).is_some());
+        assert!(table.try_find(("value-issue", 2usize)).is_some());
+        assert!(table.try_find(("value-issue", 3usize)).is_some());
+        // Placeholders are not judged before substitution.
+        assert!(table.try_find(("key-issue", 4usize)).is_none());
+        assert!(table.try_find(("value-issue", 4usize)).is_none());
+    });
+    view.read_with(window, |v, _| {
+        let (name, _) = v.header_issues(1);
+        assert_eq!(name.unwrap().message, "В имени заголовка не может быть пробелов");
+        let (_, value) = v.header_issues(2);
+        let value = value.unwrap();
+        assert!(value.is_error());
+        assert_eq!(value.message, "В заголовке не может быть перевода строки");
+        let (_, pad) = v.header_issues(3);
+        assert!(!pad.unwrap().is_error(), "edge blanks are only a warning");
+    });
+    // Fixing the name in the table clears the mark.
+    window.update(|w, cx| {
+        w.within("req-headers").click(("key", 1usize), cx);
+        w.press("cmd-a", cx);
+        w.input("X-Token", cx);
+    });
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.within("req-headers").try_find(("key-issue", 1usize)).is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn long_value_cell_expands_while_focused(cx: &mut TestAppContext) {
+    let long = "session=8f14e45fceea167a5a36dedd4bea2543; csrftoken=Zx9Kq2LmN8pR4tV7wY1aB3cD5eF6gH0j; theme=dark; lang=ru; ".repeat(4);
+    let long = long.as_str();
+    let mut spec = sample();
+    spec.headers = vec![KeyValue::new("Cookie", long), KeyValue::new("Accept", "*/*")];
+    let (view, window, events) = open(cx, spec);
+    window.update(|w, cx| {
+        w.click(("subtab", RequestEditorTab::Headers as usize), cx);
+        w.render_frame(cx);
+        // A short value stays a one-line cell.
+        w.within("req-headers").click(("value", 1usize), cx);
+        w.render_frame(cx);
+    });
+    window.run_until_parked();
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("value-expanded").is_none());
+        w.within("req-headers").click(("value", 0usize), cx);
+        w.render_frame(cx);
+    });
+    window.run_until_parked();
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        let expanded = w.find("value-expanded").bounds();
+        let cell = w.within("req-headers").find(("value-cell", 0usize)).bounds();
+        // Same width as the cell, taller (wrapped), over the rows below.
+        assert!((expanded.size.width.as_f32() - cell.size.width.as_f32()).abs() < 30.);
+        assert!(expanded.size.height.as_f32() > cell.size.height.as_f32() + 10.);
+        assert!(expanded.size.height.as_f32() <= 200.5);
+    });
+    assert!(view.read_with(window, |v, _| v.has_expanded_value()));
+
+    // Editing in the expanded editor updates the value.
+    window.update(|w, cx| {
+        w.press("cmd-a", cx);
+        w.input("short=1", cx);
+    });
+    window.update(|w, cx| w.render_frame(cx));
+    view.read_with(window, |v, _| assert_eq!(v.spec().headers[0].value, "short=1"));
+    assert!(events.borrow().contains(&RequestEditorEvent::Changed));
+
+    // Leaving the field folds it back into the cell with the new text.
+    window.update(|w, cx| {
+        w.within("req-headers").click(("key", 1usize), cx);
+        w.render_frame(cx);
+    });
+    window.run_until_parked();
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("value-expanded").is_none());
+    });
+    view.read_with(window, |v, cx| {
+        assert!(!v.has_expanded_value());
+        assert_eq!(v.spec().headers[0].value, "short=1");
+        let _ = cx;
+    });
+}

@@ -13,19 +13,22 @@ use gpui_kit::component::highlighter::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::input::{
     Editor, EditorState, HoverProvider, Input, InputEvent, InputState, RangeDecoration,
     RangeDecorationCollection, RangeDecorationStyle, Rope, RopeExt as _, TextDecoration,
-    TextDecorationCollection,
+    TextDecorationCollection, Textarea, TextareaState,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::core::openapi::GeneratedRequestBody;
+use crate::core::bulk;
+use crate::core::header_check::{self, HeaderIssue};
 use crate::core::schema_hover::{self, BodySide, FieldInfo, SchemaLink};
+use crate::core::vars;
 use crate::core::types::{Auth, BodyKind, KeyValue, Mismatch, RequestSpec};
 use crate::theme::{ActivePalette, MONO};
 use crate::ui::{
     BodyModePicker, Button, FormFieldTypePicker, HorizontalPaneSplitter, IconButton, IconName,
-    PANE_SPLITTER_HEIGHT, Pill, Popover, RequestRedirectSettings, Segmented, icon, tokenize_vars,
-    var_content, var_token_element,
+    PANE_SPLITTER_HEIGHT, Pill, Popover, RequestRedirectSettings, Segmented, Tooltip, icon,
+    tokenize_vars, var_content, var_token_element,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,7 +208,7 @@ fn details_height(available: f32, ratio: f32) -> f32 {
 }
 
 /// Which key-value list of the spec a table edits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum KvTarget {
     Params,
     Headers,
@@ -250,6 +253,39 @@ enum FileTarget {
     NewFormField,
     FormField(u64),
     BinaryBody,
+}
+
+/// A long value cell opened as a wrapping, multi-line editor over the rows
+/// below while it has focus (like Postman); edits go to the row's value.
+struct ExpandedValue {
+    target: KvTarget,
+    row_id: u64,
+    state: Entity<TextareaState>,
+    _subscription: Subscription,
+}
+
+/// Approximate width of `text` in the 12px monospace cell font.
+fn mono_text_width(text: &str) -> f32 {
+    text.chars().count() as f32 * 7.25
+}
+
+/// Params / Headers edited as `key:value` text (bulk edit).
+struct BulkEdit {
+    target: KvTarget,
+    editor: Entity<EditorState>,
+    /// Rows when the text was loaded: descriptions are carried over from them.
+    original: Vec<KeyValue>,
+    _subscription: Subscription,
+}
+
+impl KvTarget {
+    fn of_tab(tab: RequestEditorTab) -> Option<Self> {
+        match tab {
+            RequestEditorTab::Params => Some(Self::Params),
+            RequestEditorTab::Headers => Some(Self::Headers),
+            _ => None,
+        }
+    }
 }
 
 /// Editors of one table row. Dropping it drops its subscriptions.
@@ -559,6 +595,12 @@ pub struct RequestEditor {
     headers: Vec<RowInputs>,
     form: Vec<RowInputs>,
     next_row_id: u64,
+    /// Tables currently shown as bulk text instead of rows.
+    bulk: Vec<BulkEdit>,
+    /// The value cell currently expanded for editing, if any.
+    expanded: Option<ExpandedValue>,
+    /// Last painted width of each value cell: `(table, row id)` → px.
+    value_widths: Rc<std::cell::RefCell<std::collections::HashMap<(KvTarget, u64), f32>>>,
     body_editor: Entity<EditorState>,
     body_error: Option<String>,
     /// Operation of a loaded spec this request is linked to (hover info, schema checks).
@@ -713,6 +755,9 @@ impl RequestEditor {
             headers: Vec::new(),
             form: Vec::new(),
             next_row_id: 0,
+            bulk: Vec::new(),
+            expanded: None,
+            value_widths: Default::default(),
             body_editor,
             body_error: None,
             schema_link: None,
@@ -749,6 +794,7 @@ impl RequestEditor {
     /// Loads another request, rebuilding every editor. Emits nothing.
     pub fn set_spec(&mut self, spec: RequestSpec, window: &mut Window, cx: &mut Context<Self>) {
         self.spec = spec;
+        self.expanded = None;
         self.body_error = None;
         self.auth_menu_open = false;
         for target in [KvTarget::Params, KvTarget::Headers, KvTarget::Form] {
@@ -761,6 +807,15 @@ impl RequestEditor {
                 .map(|kv| self.make_row(target, kv, window, cx))
                 .collect();
             *self.rows_mut(target) = rows;
+        }
+        for ix in 0..self.bulk.len() {
+            let list = self.bulk[ix].target.list(&self.spec).clone();
+            let text = bulk::to_text(&list);
+            self.bulk[ix].original = list;
+            self.bulk[ix]
+                .editor
+                .clone()
+                .update(cx, |s, cx| s.set_value(text, window, cx));
         }
 
         let text = self.spec.body.text.clone();
@@ -1272,6 +1327,88 @@ impl RequestEditor {
         cx.notify();
     }
 
+    /// Whether `tab` (Params / Headers) shows its rows as `key:value` text.
+    pub fn is_bulk_edit(&self, tab: RequestEditorTab) -> bool {
+        KvTarget::of_tab(tab).is_some_and(|t| self.bulk.iter().any(|b| b.target == t))
+    }
+
+    /// Current bulk text of `tab`, when it is in bulk mode.
+    pub fn bulk_text(&self, tab: RequestEditorTab, cx: &App) -> Option<String> {
+        let target = KvTarget::of_tab(tab)?;
+        let bulk = self.bulk.iter().find(|b| b.target == target)?;
+        Some(bulk.editor.read(cx).value().to_string())
+    }
+
+    /// Switches the active Params / Headers table between rows and bulk text.
+    /// Rows → text → rows keeps order, enabled flags and descriptions.
+    pub fn toggle_bulk_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = KvTarget::of_tab(self.tab) else {
+            return;
+        };
+        self.expanded = None;
+        if let Some(pos) = self.bulk.iter().position(|b| b.target == target) {
+            self.bulk.remove(pos);
+            let rows: Vec<RowInputs> = target
+                .list(&self.spec)
+                .clone()
+                .iter()
+                .map(Some)
+                .chain([None])
+                .map(|kv| self.make_row(target, kv, window, cx))
+                .collect();
+            *self.rows_mut(target) = rows;
+            self.param_hover = None;
+            cx.notify();
+            return;
+        }
+        let original = target.list(&self.spec).clone();
+        let text = bulk::to_text(&original);
+        let editor = cx.new(|cx| {
+            let mut s = EditorState::new(window, cx);
+            s.set_value(text, window, cx);
+            s
+        });
+        let subscription = cx.subscribe_in(
+            &editor,
+            window,
+            move |this, state, ev: &InputEvent, _, cx| {
+                if !matches!(ev, InputEvent::Change) {
+                    return;
+                }
+                let text = state.read(cx).value().to_string();
+                // `set_spec` reloading the text is not an edit.
+                if text == bulk::to_text(target.list(&this.spec)) {
+                    return;
+                }
+                let Some(original) =
+                    this.bulk.iter().find(|b| b.target == target).map(|b| &b.original)
+                else {
+                    return;
+                };
+                let rows = bulk::from_text(&text, original);
+                *target.list_mut(&mut this.spec) = rows;
+                cx.emit(RequestEditorEvent::Changed);
+                cx.notify();
+            },
+        );
+        editor.update(cx, |s, cx| s.focus(window, cx));
+        self.bulk.push(BulkEdit { target, editor, original, _subscription: subscription });
+        cx.notify();
+    }
+
+    /// Problems of header row `ix` as typed: `(name, value)`. `{{vars}}` are
+    /// checked as placeholders here; their values are checked when sending.
+    pub fn header_issues(&self, ix: usize) -> (Option<HeaderIssue>, Option<HeaderIssue>) {
+        let Some(h) = self.spec.headers.get(ix) else {
+            return (None, None);
+        };
+        let name = vars::mask_placeholders(h.key.trim(), "x");
+        (
+            header_check::check_name(&name, !h.value.is_empty()),
+            header_check::check_value(&h.value),
+        )
+    }
+
     fn rows(&self, target: KvTarget) -> &Vec<RowInputs> {
         match target {
             KvTarget::Params => &self.params,
@@ -1394,6 +1531,107 @@ impl RequestEditor {
         cx.notify();
     }
 
+    /// Whether a value cell is open as the multi-line editor (tests).
+    pub fn has_expanded_value(&self) -> bool {
+        self.expanded.is_some()
+    }
+
+    /// Expands the focused value cell / folds the expanded one once it loses
+    /// focus. Checked while rendering: focus events need an active window.
+    fn sync_expanded_value(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(expanded) = &self.expanded {
+            if !expanded.state.read(cx).focus_handle(cx).is_focused(window) {
+                cx.defer_in(window, |this, window, cx| {
+                    let lost = this
+                        .expanded
+                        .as_ref()
+                        .is_some_and(|e| !e.state.read(cx).focus_handle(cx).is_focused(window));
+                    if lost {
+                        this.collapse_value(window, cx);
+                    }
+                });
+            }
+            return;
+        }
+        let target = match self.tab {
+            RequestEditorTab::Params => KvTarget::Params,
+            RequestEditorTab::Headers => KvTarget::Headers,
+            _ => KvTarget::Form,
+        };
+        let focused = self
+            .rows(target)
+            .iter()
+            .find(|r| r.value.read(cx).focus_handle(cx).is_focused(window))
+            .map(|r| r.id);
+        if let Some(row_id) = focused {
+            cx.defer_in(window, move |this, window, cx| this.expand_value(target, row_id, window, cx));
+        }
+    }
+
+    /// Opens value cell `row_id` as a wrapping editor when its text doesn't fit.
+    fn expand_value(&mut self, target: KvTarget, row_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.expanded.is_some() {
+            return;
+        }
+        let Some(row) = self.rows(target).iter().find(|r| r.id == row_id) else {
+            return;
+        };
+        let text = row.value.read(cx).value().to_string();
+        let width = self.value_widths.borrow().get(&(target, row_id)).copied();
+        let Some(width) = width else { return };
+        if mono_text_width(&text) <= width - 12. {
+            return;
+        }
+        let state = cx.new(|cx| {
+            let mut s = TextareaState::new(window, cx).auto_grow(1, 8);
+            s.set_value(text, window, cx);
+            s
+        });
+        let subscription = cx.subscribe_in(
+            &state,
+            window,
+            move |this, state, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Change => {
+                    let text = state.read(cx).value().to_string();
+                    // A header/param value is one line: Enter finishes editing.
+                    if text.contains('\n') {
+                        let flat = text.replace(['\r', '\n'], "");
+                        state.update(cx, |s, cx| s.set_value(flat, window, cx));
+                        this.collapse_value(window, cx);
+                        return;
+                    }
+                    let Some(pos) = this.rows(target).iter().position(|r| r.id == row_id) else {
+                        return;
+                    };
+                    if let Some(kv) = target.list_mut(&mut this.spec).get_mut(pos) {
+                        if kv.value != text {
+                            kv.value = text;
+                            cx.emit(RequestEditorEvent::Changed);
+                        }
+                    }
+                    cx.notify();
+                }
+                InputEvent::Blur => this.collapse_value(window, cx),
+                _ => {}
+            },
+        );
+        state.update(cx, |s, cx| s.focus(window, cx));
+        self.expanded = Some(ExpandedValue { target, row_id, state, _subscription: subscription });
+        cx.notify();
+    }
+
+    /// Back to the one-line cell, showing the edited value.
+    fn collapse_value(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(expanded) = self.expanded.take() else {
+            return;
+        };
+        let text = expanded.state.read(cx).value().to_string();
+        if let Some(row) = self.rows(expanded.target).iter().find(|r| r.id == expanded.row_id) {
+            row.value.clone().update(cx, |s, cx| s.set_value(var_content(&text), window, cx));
+        }
+        cx.notify();
+    }
+
     fn toggle_row(&mut self, target: KvTarget, ix: usize, cx: &mut Context<Self>) {
         if let Some(kv) = target.list_mut(&mut self.spec).get_mut(ix) {
             kv.enabled = !kv.enabled;
@@ -1404,6 +1642,7 @@ impl RequestEditor {
 
     fn delete_row(&mut self, target: KvTarget, ix: usize, cx: &mut Context<Self>) {
         if ix < target.list(&self.spec).len() {
+            self.expanded = None;
             target.list_mut(&mut self.spec).remove(ix);
             self.rows_mut(target).remove(ix);
             cx.emit(RequestEditorEvent::Changed);
@@ -1585,6 +1824,16 @@ impl RequestEditor {
             .border_color(p.border)
             .children(tabs)
             .child(div().flex_1())
+            .when(KvTarget::of_tab(self.tab).is_some(), |d| {
+                let bulk = self.is_bulk_edit(self.tab);
+                d.child(
+                    Button::new("bulk-toggle", if bulk { "Таблица" } else { "Bulk Edit" })
+                        .ghost()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_bulk_edit(window, cx)
+                        })),
+                )
+            })
             .when_some(self.spec.spec_ref.as_ref(), |d, r| {
                 d.child(
                     Pill::new(format!("Linked to spec · {}", r.method.full_label()))
@@ -1598,8 +1847,45 @@ impl RequestEditor {
             )
     }
 
-    fn render_kv(&self, target: KvTarget, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_kv(&self, target: KvTarget, cx: &mut Context<Self>) -> AnyElement {
         let p = *cx.palette();
+        if let Some(bulk) = self.bulk.iter().find(|b| b.target == target) {
+            return div()
+                .id(target.scope())
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    div()
+                        .id("bulk-editor")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .child(
+                            Editor::new(&bulk.editor)
+                                .appearance(false)
+                                .bordered(false)
+                                .font_family(MONO)
+                                .text_size(px(12.))
+                                .h(relative(1.)),
+                        )
+                        .test_support(),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(14.))
+                        .py(px(5.))
+                        .border_t_1()
+                        .border_color(p.border)
+                        .text_size(px(11.))
+                        .text_color(p.text_dim)
+                        .child("key:value — по одной на строку; // в начале строки выключает её"),
+                )
+                .into_any_element();
+        }
         let list = target.list(&self.spec);
         let is_multipart = target == KvTarget::Form && self.spec.body.kind == BodyKind::Multipart;
         let header = div()
@@ -1627,8 +1913,30 @@ impl RequestEditor {
             .child(div().flex_1().child("DESCRIPTION"))
             .child(div().w(px(22.)).flex_none());
 
+        let issue_badge = |id: (&'static str, usize), issue: &HeaderIssue| {
+            let color = if issue.is_error() { p.danger } else { p.warn };
+            div()
+                .id(id)
+                .flex_none()
+                .px(px(4.))
+                .child(icon(IconName::TriangleAlert, 12., color))
+                .tooltip(Tooltip::new(issue.message.clone()).build())
+                .test_support()
+        };
+        let issue_border = |d: Stateful<Div>, issue: &Option<HeaderIssue>| match issue {
+            Some(i) => d
+                .rounded(px(4.))
+                .border_1()
+                .border_color(if i.is_error() { p.danger } else { p.warn }),
+            None => d,
+        };
         let rows = self.rows(target).iter().enumerate().map(|(ix, row)| {
             let kv = list.get(ix);
+            let (name_issue, value_issue) = if target == KvTarget::Headers && kv.is_some() {
+                self.header_issues(ix)
+            } else {
+                (None, None)
+            };
             let row_id = row.id;
             let draft = kv.is_none();
             let enabled = kv.is_none_or(|kv| kv.enabled);
@@ -1686,8 +1994,8 @@ impl RequestEditor {
                 .border_color(p.border.opacity(0.6))
                 .child(toggle)
                 .child(
-                    div()
-                        .id(("key-cell", ix))
+                    issue_border(div().id(("key-cell", ix)), &name_issue)
+                        .relative()
                         .flex_1()
                         .min_w_0()
                         .when(!enabled, |d| d.opacity(0.45))
@@ -1697,6 +2005,15 @@ impl RequestEditor {
                             }))
                         })
                         .child(cell(&row.key, "key", true))
+                        .when_some(name_issue.as_ref(), |d, issue| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .right(px(2.))
+                                    .top(px(8.))
+                                    .child(issue_badge(("key-issue", ix), issue)),
+                            )
+                        })
                         .when_some(
                             (self.param_hover == Some((target, ix)))
                                 .then(|| self.param_info(target, ix))
@@ -1731,13 +2048,68 @@ impl RequestEditor {
                 })
                 .child(
                     div()
+                        .relative()
                         .flex_basis(relative(0.))
                         .flex_grow(1.4)
                         .flex_shrink(1.)
                         .min_w_0()
                         .when(!enabled, |d| d.opacity(0.45))
+                        .child({
+                            let widths = self.value_widths.clone();
+                            canvas(
+                                move |bounds, _, _| {
+                                    widths
+                                        .borrow_mut()
+                                        .insert((target, row_id), bounds.size.width.as_f32());
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .inset_0()
+                        })
+                        .when_some(
+                            self.expanded
+                                .as_ref()
+                                .filter(|e| e.target == target && e.row_id == row_id),
+                            |d, expanded| {
+                                let width = self
+                                    .value_widths
+                                    .borrow()
+                                    .get(&(target, row_id))
+                                    .copied()
+                                    .unwrap_or(240.);
+                                d.child(
+                                    div().absolute().top_0().left_0().child(
+                                        deferred(
+                                            anchored().snap_to_window_with_margin(px(8.)).child(
+                                                div()
+                                                    .id("value-expanded")
+                                                    .w(px(width))
+                                                    .max_h(px(200.))
+                                                    .overflow_y_scroll()
+                                                    .px(px(4.))
+                                                    .py(px(2.))
+                                                    .rounded(px(6.))
+                                                    .bg(p.surface)
+                                                    .border_1()
+                                                    .border_color(p.accent)
+                                                    .shadow_lg()
+                                                    .child(
+                                                        Textarea::new(&expanded.state)
+                                                            .appearance(false)
+                                                            .font_family(MONO)
+                                                            .text_size(px(12.)),
+                                                    )
+                                                    .test_support(),
+                                            ),
+                                        )
+                                        .with_priority(3),
+                                    ),
+                                )
+                            },
+                        )
                         .child(
-                            div()
+                            issue_border(div().id(("value-cell", ix)), &value_issue)
                                 .flex()
                                 .items_center()
                                 .min_w_0()
@@ -1745,6 +2117,10 @@ impl RequestEditor {
                                     cell(&row.value, "value", true)
                                         .token(|ctx, _, cx| var_token_element(ctx, cx)),
                                 )
+                                .when_some(value_issue.as_ref(), |d, issue| {
+                                    d.child(issue_badge(("value-issue", ix), issue))
+                                })
+                                .test_support()
                                 .when(is_multipart && kv.is_some_and(|field| field.file), |d| {
                                     d.child(
                                         Button::new(
@@ -1784,6 +2160,7 @@ impl RequestEditor {
             .overflow_y_scroll()
             .child(header)
             .children(rows)
+            .into_any_element()
     }
 
     fn render_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2352,6 +2729,7 @@ impl Render for RequestEditor {
         {
             self.highlight_body_vars(cx);
         }
+        self.sync_expanded_value(window, cx);
         let p = *cx.palette();
         let content = match self.tab {
             RequestEditorTab::Params => self.render_kv(KvTarget::Params, cx).into_any_element(),

@@ -1162,3 +1162,180 @@ fn unsaved_dot_and_close_prompt(cx: &mut TestAppContext) {
     });
     assert_eq!(view.read_with(window, |v, _| v.tabs.len()), tabs - 1);
 }
+
+#[gpui_kit::test]
+fn env_menu_creates_environment_even_when_there_are_none(cx: &mut TestAppContext) {
+    let (view, window) = open_with(cx, store::seed_project());
+    window.update(|w, cx| {
+        w.click("env-switch", cx);
+        w.render_frame(cx);
+        assert!(w.try_find("env-create").is_some());
+        w.click("env-create", cx);
+        w.render_frame(cx);
+    });
+    view.read_with(window, |v, _| {
+        assert!(!v.env_menu_open);
+        assert!(v.rail == RailMode::Environments);
+        assert_eq!(v.project.environments.len(), 1);
+        assert_eq!(v.project.active_env, 0);
+        assert!(v.env().is_some());
+    });
+
+    // With environments the row is still there, below the list.
+    let (view, window) = open(cx);
+    window.update(|w, cx| {
+        w.click("env-switch", cx);
+        w.render_frame(cx);
+        let last = w.find(("env", 2usize)).bounds();
+        let create = w.find("env-create").bounds();
+        assert!(create.origin.y > last.origin.y);
+        w.click("env-create", cx);
+        w.render_frame(cx);
+    });
+    view.read_with(window, |v, _| {
+        assert_eq!(v.project.environments.len(), 4);
+        assert_eq!(v.project.active_env, 0, "creating does not switch the active env");
+        assert!(v.rail == RailMode::Environments);
+    });
+}
+
+fn open_tabs(cx: &mut TestAppContext, count: usize) -> (Entity<Workspace>, &mut VisualTestContext) {
+    let mut project = project();
+    project.open_tabs = (0..count)
+        .map(|i| rivet::core::RequestSpec::new(format!("Request {i}"), Method::Get, format!("http://h/{i}")))
+        .collect();
+    project.active_tab = Some(0);
+    open_with(cx, project)
+}
+
+#[gpui_kit::test]
+fn dragging_a_tab_reorders_tabs_and_keeps_the_active_one(cx: &mut TestAppContext) {
+    let (view, window) = open_tabs(cx, 3);
+    let names = |view: &Entity<Workspace>, window: &mut VisualTestContext| {
+        view.read_with(window, |v, _| {
+            v.tabs.iter().map(|t| t.request.name.clone()).collect::<Vec<_>>()
+        })
+    };
+    window.update(|w, cx| w.drag_to(("tab", 0usize), ("tab", 2usize), cx));
+    assert_eq!(names(&view, window), ["Request 1", "Request 2", "Request 0"]);
+    view.read_with(window, |v, _| {
+        assert_eq!(v.active_tab, Some(2));
+        assert_eq!(v.active().unwrap().name, "Request 0");
+    });
+    window.update(|w, cx| w.drag_to(("tab", 1usize), ("tab", 0usize), cx));
+    assert_eq!(names(&view, window), ["Request 2", "Request 1", "Request 0"]);
+    view.read_with(window, |v, _| assert_eq!(v.active_tab, Some(2)));
+    // A click (no movement) still just activates.
+    window.update(|w, cx| w.click(("tab", 0usize), cx));
+    assert_eq!(names(&view, window), ["Request 2", "Request 1", "Request 0"]);
+    view.read_with(window, |v, _| assert_eq!(v.active_tab, Some(0)));
+}
+
+#[gpui_kit::test]
+fn new_tab_button_follows_last_tab_then_sticks_right(cx: &mut TestAppContext) {
+    let (_, window) = open_tabs(cx, 2);
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        let last = w.find(("tab", 1usize)).bounds();
+        let plus = w.find("new-tab-area").bounds();
+        let gap = plus.origin.x.as_f32() - (last.origin.x + last.size.width).as_f32();
+        assert!(gap.abs() <= 2., "`+` right after the last tab, gap {gap}");
+        assert!(plus.origin.x.as_f32() + plus.size.width.as_f32() < w.viewport_size().width.as_f32() - 100.);
+    });
+
+    let (_, window) = open_tabs(cx, 40);
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        let plus = w.find("new-tab-area").bounds();
+        let right = plus.origin.x.as_f32() + plus.size.width.as_f32();
+        let bar = w.find("tabbar").bounds();
+        // Visible, at the right edge of the strip, and the tabs end before it.
+        assert!(right <= w.viewport_size().width.as_f32() + 0.5, "`+` off screen at {right}");
+        assert!((bar.origin.x + bar.size.width).as_f32() <= plus.origin.x.as_f32() + 0.5);
+        assert!(w.viewport_size().width.as_f32() - right < 2., "`+` sticks to the right: {right}");
+    });
+}
+
+#[gpui_kit::test]
+fn undefined_variables_are_sent_empty_with_a_warning(cx: &mut TestAppContext) {
+    let (base, seen) = serve_recording();
+    let mut p = project();
+    p.environments[0].vars.retain(|v| v.key != "baseUrl");
+    p.environments[0].vars.push(KeyValue::new("baseUrl", base));
+    let mut request = rivet::core::RequestSpec::new("Q", Method::Get, "{{baseUrl}}/q");
+    request.params = vec![
+        KeyValue::new("{{test111}}", "12321"),
+        KeyValue::new("v", "{{v}}"),
+        KeyValue::new("customer", "{{customerId}}"),
+    ];
+    p.open_tabs = vec![request];
+    p.active_tab = Some(0);
+    let (view, window) = open_with(cx, p);
+
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        // Warned before sending.
+        assert!(w.try_find("missing-vars").is_some());
+        w.press("cmd-enter", cx);
+    });
+    wait_sent(&view, window, 0);
+    let line = seen.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(line, "GET /q?v=&customer=c_51b2e7a0 HTTP/1.1");
+    assert!(!line.contains("%7B"));
+    view.read_with(window, |v, _| {
+        assert!(matches!(v.tabs[0].response, ResponseState::Done { .. }));
+        let notice = v.notice.as_deref().unwrap_or_default();
+        assert!(notice.contains("{{test111}}") && notice.contains("{{v}}"), "{notice}");
+    });
+}
+
+#[gpui_kit::test]
+fn pasting_multiline_curl_into_url_field_imports_it(cx: &mut TestAppContext) {
+    let (view, window) = open_with(cx, store::seed_project());
+    // As copied from GitHub docs: `\` line continuations, a `$ ` prompt.
+    let cmd = "$ curl -L \\\n  -H \"Accept: application/vnd.github+json\" \\\n  -H \"Authorization: Bearer <YOUR-TOKEN>\" \\\n  -H \"X-GitHub-Api-Version: 2022-11-28\" \\\n  https://api.github.com/repos/OWNER/REPO/issues";
+    window.update(|w, cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(cmd.to_string()));
+        w.click("url", cx);
+        w.press("cmd-v", cx);
+        w.render_frame(cx);
+    });
+    window.run_until_parked();
+    view.read_with(window, |v, _| {
+        let r = v.active().unwrap();
+        assert_eq!(r.url, "https://api.github.com/repos/OWNER/REPO/issues");
+        assert_eq!(
+            r.headers,
+            vec![
+                KeyValue::new("Accept", "application/vnd.github+json"),
+                KeyValue::new("X-GitHub-Api-Version", "2022-11-28"),
+            ]
+        );
+        assert_eq!(v.notice.as_deref(), Some("cURL импортирован"));
+    });
+}
+
+#[gpui_kit::test]
+fn invalid_header_is_not_sent_and_explains_why(cx: &mut TestAppContext) {
+    let (base, seen) = serve_recording();
+    let mut p = project();
+    let mut request = rivet::core::RequestSpec::new("Q", Method::Get, format!("{base}/q"));
+    request.headers = vec![KeyValue::new("Cookie", "a=1\nb=2")];
+    p.open_tabs = vec![request];
+    p.active_tab = Some(0);
+    let (view, window) = open_with(cx, p);
+    window.update(|w, cx| w.press("cmd-enter", cx));
+    wait_sent(&view, window, 0);
+    view.read_with(window, |v, _| match &v.tabs[0].response {
+        ResponseState::Failed(rivet::core::SendError::InvalidHeader { name, message }) => {
+            assert_eq!(name, "Cookie");
+            assert_eq!(message, "В заголовке не может быть перевода строки");
+        }
+        other => panic!("{other:?}"),
+    });
+    window.update(|w, cx| {
+        w.render_frame(cx);
+        assert!(w.try_find("response-error-pill").is_some());
+    });
+    assert!(seen.lock().unwrap().is_empty(), "nothing reached the server");
+}

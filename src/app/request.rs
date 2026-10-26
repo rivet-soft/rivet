@@ -132,6 +132,10 @@ impl Workspace {
                 let tab = Tab::new(("tab", ix), label);
                 let tab = if is_ws { tab } else { tab.method(t.request.method) };
                 tab.active(self.active_tab == Some(ix))
+                    .draggable(ix)
+                    .on_tab_drop(cx.listener(move |this, drag: &crate::ui::TabDrag, _, cx| {
+                        this.move_tab(drag.index, ix, cx)
+                    }))
                     .dirty(self.tab_unsaved(ix))
                     .busy(t.is_sending() || (is_ws && ws_view.is_live(&t.request.id)))
                     .on_click(
@@ -222,14 +226,17 @@ impl Workspace {
                 })
                 .ok();
             });
+        // `+` follows the last tab; once the tabs overflow, their strip shrinks
+        // (and scrolls) so `+` sticks to the right edge, like a browser.
         div()
             .flex()
             .flex_none()
             .items_start()
             .bg(p.surface)
-            .child(div().flex_1().min_w_0().overflow_hidden().child(bar))
+            .child(div().flex_initial().min_w_0().overflow_hidden().child(bar))
             .child(
                 div()
+                    .id("new-tab-area")
                     .flex()
                     .flex_none()
                     .items_center()
@@ -237,8 +244,10 @@ impl Workspace {
                     .px(px(6.))
                     .border_b_1()
                     .border_color(p.border)
-                    .child(new_menu),
+                    .child(new_menu)
+                    .test_support(),
             )
+            .child(div().flex_1().h(px(36.)).border_b_1().border_color(p.border))
     }
 
     fn run_tab_action(
@@ -385,6 +394,14 @@ impl Workspace {
 
         let url = Input::new(&self.url_input)
             .id("url")
+            .on_paste({
+                let view = view.clone();
+                move |clipboard, window, cx| {
+                    let Some(text) = clipboard.text() else { return false };
+                    view.update(cx, |this, cx| this.import_curl(&text, window, cx))
+                        .unwrap_or(false)
+                }
+            })
             .token(|ctx, _, cx| var_token_element(ctx, cx))
             .appearance(false)
             .font_family(MONO)
@@ -408,7 +425,7 @@ impl Workspace {
                 .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
         };
 
-        let resolved = vars::resolve(request, self.env());
+        let resolved = vars::resolve(request, self.request_env(request).as_ref());
         let resolved_url = resolved.as_ref().map(|r| r.url.clone()).unwrap_or_default();
         let missing = resolved.map(|r| r.missing_vars).unwrap_or_default();
 
@@ -504,7 +521,7 @@ impl Workspace {
                         .text_size(px(11.))
                         .text_color(p.warn)
                         .child(icon(IconName::TriangleAlert, 12., p.warn))
-                        .child("Не определены в окружении:")
+                        .child("Не определены (будут отправлены пустыми):")
                         .children(
                             missing
                                 .into_iter()
@@ -559,7 +576,7 @@ impl Workspace {
                 .icon(IconName::Play),
         }
         .on_click(cx.listener(|this, _, _, cx| this.ws_toggle(cx)));
-        let missing = ws::resolve(request, self.env())
+        let missing = ws::resolve(request, self.request_env(request).as_ref())
             .map(|r| r.missing_vars)
             .unwrap_or_default();
         div()
@@ -614,7 +631,7 @@ impl Workspace {
                         .text_size(px(11.))
                         .text_color(p.warn)
                         .child(icon(IconName::TriangleAlert, 12., p.warn))
-                        .child("Не определены в окружении:")
+                        .child("Не определены (будут отправлены пустыми):")
                         .children(
                             missing
                                 .into_iter()
