@@ -208,13 +208,26 @@ impl CollectionPanel {
                             .child(div().size(px(8.)).rounded_full().bg(p.online))
                             .child(div().font_family(MONO).child(run.url.clone()))
                             .child(div().text_color(p.text_dim).child(format!(
-                                "{} · запросов с примерами: {}",
+                                "{} · из примеров: {} · из спецификации: {}",
                                 run.engine.label(),
-                                run.answered
+                                run.coverage.from_examples,
+                                run.coverage.from_spec,
                             )))
                             .test_support(),
                     )
-                    .children(run.notes.iter().map(|n| div().text_size(px(11.5)).text_color(p.warn).child(n.clone())))
+                    .when(!run.coverage.missing.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .id("collection-mock-missing")
+                                .text_size(px(11.5))
+                                .text_color(p.warn)
+                                .child(format!(
+                                    "Без примеров (отвечают 501 с подсказкой): {}. Отправьте их и сохраните ответ закладкой в заголовке ответа — мок обновится сам.",
+                                    run.coverage.missing.join(", ")
+                                ))
+                                .test_support(),
+                        )
+                    })
                     .child(
                         div()
                             .flex()

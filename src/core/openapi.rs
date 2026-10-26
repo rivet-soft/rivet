@@ -403,6 +403,53 @@ impl Spec {
         serde_json::to_string_pretty(&value).ok()
     }
 
+    /// Responses the spec declares for an operation, as (status, body):
+    /// success codes first; `2XX`-style ranges become their `x00` code;
+    /// `default` is skipped. Bodies come from spec examples or the schema.
+    pub fn response_examples(&self, r: &SpecRef) -> Vec<(u16, String)> {
+        let Some(responses) = self.operation(r).and_then(|op| op.get("responses")).and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        let mut codes: Vec<u16> = responses
+            .keys()
+            .filter_map(|k| {
+                k.parse::<u16>().ok().or_else(|| {
+                    let k = k.to_ascii_uppercase();
+                    k.strip_suffix("XX").and_then(|d| d.parse::<u16>().ok()).map(|d| d * 100)
+                })
+            })
+            .filter(|c| (100..600).contains(c))
+            .collect();
+        codes.sort_by_key(|c| (!(200..300).contains(c), *c));
+        codes.dedup();
+        codes
+            .into_iter()
+            .map(|code| {
+                let declared = self.declared_example(responses, code);
+                let body = declared
+                    .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                    .or_else(|| self.example_response(r, code))
+                    .unwrap_or_default();
+                (code, body)
+            })
+            .collect()
+    }
+
+    /// An example written in the spec for response `code` (no schema needed).
+    fn declared_example(&self, responses: &serde_json::Map<String, Value>, code: u16) -> Option<Value> {
+        let range = format!("{}XX", code / 100);
+        let key = responses
+            .keys()
+            .find(|k| **k == code.to_string())
+            .or_else(|| responses.keys().find(|k| k.eq_ignore_ascii_case(&range)))?;
+        let response = self.deref(&responses[key]);
+        if self.swagger2 {
+            response.get("examples").and_then(|e| e.get("application/json")).cloned()
+        } else {
+            response.get("content").and_then(json_media).and_then(|media| media_example(&self.doc, media))
+        }
+    }
+
     // ---------------------------------------------------------------------
 
     fn deref<'a>(&'a self, v: &'a Value) -> &'a Value {

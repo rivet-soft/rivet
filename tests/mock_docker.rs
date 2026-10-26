@@ -44,7 +44,7 @@ fn wiremock_in_docker_serves_examples() {
     let dir = std::env::temp_dir().join(format!("rivet-live-mock-{}", rivet::core::new_id()));
     let settings = MockSettings::default();
     let port = mock::free_port(settings.port, &[]).unwrap();
-    let run = mock::start(&docker, &settings, &c, &dir, port).expect("mock starts");
+    let run = mock::start(&docker, &settings, &c, None, &dir, port).expect("mock starts");
     let result = std::panic::catch_unwind(|| {
         assert_eq!(get(&format!("{}/users/7", run.url), None), (200, r#"{"id":1}"#.into()));
         assert_eq!(get(&format!("{}/users/7", run.url), Some(("x-mock-response-name", "missing"))).0, 404);
@@ -53,7 +53,7 @@ fn wiremock_in_docker_serves_examples() {
     });
     // Reload with a changed example, without restarting.
     c.requests[0].examples[0].body = r#"{"id":2}"#.into();
-    let reloaded = mock::reload(&run, &c).expect("reload");
+    let reloaded = mock::reload(&run, &c, None).expect("reload");
     let after = get(&format!("{}/users/7", reloaded.url), None);
     mock::stop(&docker, &run).expect("stop");
     std::fs::remove_dir_all(&dir).ok();

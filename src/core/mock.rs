@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::export::split_url;
-use super::types::Collection;
+use super::openapi::Spec;
+use super::types::{Collection, RequestSpec};
 
 /// Mock engine (Settings → Моки). Only WireMock for now.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -137,53 +138,98 @@ fn url_matcher(url: &str) -> (&'static str, String) {
     ("urlPathPattern", pattern)
 }
 
-/// `{"mappings": [...]}` for WireMock from the collection's examples, plus
-/// notes (requests without examples get no stub).
-pub fn wiremock_mappings(c: &Collection) -> (Value, Vec<String>) {
+/// How a mock answers a collection's requests.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MockCoverage {
+    /// Requests answered with their saved examples.
+    pub from_examples: usize,
+    /// Requests without examples answered from the linked OpenAPI spec.
+    pub from_spec: usize,
+    /// Requests with neither: they get a 501 that says so.
+    pub missing: Vec<String>,
+}
+
+/// A stub matching `method` + the request's URL; `pick` adds a header match.
+fn stub(
+    r: &RequestSpec,
+    name: String,
+    priority: u32,
+    pick: Option<(&str, String)>,
+    response: Value,
+    example_id: Option<&str>,
+) -> Value {
+    let (match_kind, url) = url_matcher(&r.url);
+    let mut request = json!({"method": r.method.full_label(), match_kind: url});
+    if let Some((header, value)) = pick {
+        request["headers"] = json!({header: {"equalTo": value}});
+    }
+    json!({
+        "name": name,
+        "priority": priority,
+        "request": request,
+        "response": response,
+        "metadata": {"rivet": {"request_id": r.id, "example_id": example_id}},
+    })
+}
+
+/// `{"mappings": [...]}` for WireMock. Each request is answered by its saved
+/// examples; without any, by the responses its linked OpenAPI operation
+/// declares (examples or schema-generated); otherwise by a 501 explaining
+/// that it has no example.
+pub fn wiremock_mappings(c: &Collection, spec: Option<&Spec>) -> (Value, MockCoverage) {
     let mut mappings = Vec::new();
-    let mut without = Vec::new();
+    let mut coverage = MockCoverage::default();
     for r in c.requests.iter().filter(|r| !r.is_ws()) {
-        if r.examples.is_empty() {
-            without.push(r.name.clone());
+        if !r.examples.is_empty() {
+            coverage.from_examples += 1;
+            for (i, e) in r.examples.iter().enumerate() {
+                let mut headers = Map::new();
+                for h in e.headers.iter().filter(|h| replayed_header(&h.key)) {
+                    headers.insert(h.key.clone(), json!(h.value));
+                }
+                let response = json!({"status": e.status, "headers": headers, "body": e.body});
+                let name = format!("{} · {}", r.name, e.name);
+                let id = Some(e.id.as_str());
+                mappings.push(stub(r, name.clone(), 1, Some(("x-mock-response-name", e.name.clone())), response.clone(), id));
+                mappings.push(stub(r, name.clone(), 2, Some(("x-mock-response-code", e.status.to_string())), response.clone(), id));
+                // The first example answers when no header picks one.
+                if i == 0 {
+                    mappings.push(stub(r, name, 5, None, response, id));
+                }
+            }
             continue;
         }
-        let (match_kind, url) = url_matcher(&r.url);
-        let method = r.method.full_label();
-        for (i, e) in r.examples.iter().enumerate() {
-            let mut headers = Map::new();
-            for h in e.headers.iter().filter(|h| replayed_header(&h.key)) {
-                headers.insert(h.key.clone(), json!(h.value));
-            }
-            let response = json!({"status": e.status, "headers": headers, "body": e.body});
-            let stub = |priority: u32, extra: Option<(&str, String)>| {
-                let mut request = json!({"method": method, match_kind: url});
-                if let Some((header, value)) = extra {
-                    request["headers"] = json!({header: {"equalTo": value}});
+        let declared = match (spec, &r.spec_ref) {
+            (Some(spec), Some(spec_ref)) => spec.response_examples(spec_ref),
+            _ => Vec::new(),
+        };
+        if !declared.is_empty() {
+            coverage.from_spec += 1;
+            for (i, (status, body)) in declared.into_iter().enumerate() {
+                let headers = if body.is_empty() { json!({}) } else { json!({"Content-Type": "application/json"}) };
+                let response = json!({"status": status, "headers": headers, "body": body});
+                let name = format!("{} · спецификация {status}", r.name);
+                mappings.push(stub(r, name.clone(), 3, Some(("x-mock-response-code", status.to_string())), response.clone(), None));
+                if i == 0 {
+                    mappings.push(stub(r, name, 6, None, response, None));
                 }
-                json!({
-                    "name": format!("{} · {}", r.name, e.name),
-                    "priority": priority,
-                    "request": request,
-                    "response": response,
-                    "metadata": {"rivet": {"request_id": r.id, "example_id": e.id}},
-                })
-            };
-            mappings.push(stub(1, Some(("x-mock-response-name", e.name.clone()))));
-            mappings.push(stub(2, Some(("x-mock-response-code", e.status.to_string()))));
-            // The first example answers when no header picks one.
-            if i == 0 {
-                mappings.push(stub(5, None));
             }
+            continue;
         }
+        coverage.missing.push(r.name.clone());
+        let body = json!({
+            "error": "У этого запроса нет сохранённого примера",
+            "request": r.name,
+            "hint": "Отправьте запрос в Rivet и сохраните ответ закладкой в заголовке ответа, затем «Обновить» мок",
+        });
+        let response = json!({
+            "status": 501,
+            "headers": {"Content-Type": "application/json; charset=utf-8"},
+            "body": body.to_string(),
+        });
+        mappings.push(stub(r, format!("{} · нет примера", r.name), 9, None, response, None));
     }
-    let mut notes = Vec::new();
-    if !without.is_empty() {
-        notes.push(format!(
-            "без примеров (мок их не знает): {} — сохраните ответ закладкой в ответе",
-            without.join(", ")
-        ));
-    }
-    (json!({"mappings": mappings}), notes)
+    (json!({"mappings": mappings}), coverage)
 }
 
 /// Number of example-backed requests the mock answers.
@@ -245,18 +291,18 @@ pub fn run_args(settings: &MockSettings, name: &str, dir: &Path, port: u16) -> V
 }
 
 /// Writes the engine's files for `c` into `dir` (WireMock: `mappings/rivet.json`).
-/// Returns the notes from mapping generation.
-pub fn write_files(engine: MockEngine, c: &Collection, dir: &Path) -> Result<Vec<String>, String> {
+/// Returns how the requests are covered.
+pub fn write_files(engine: MockEngine, c: &Collection, spec: Option<&Spec>, dir: &Path) -> Result<MockCoverage, String> {
     match engine {
         MockEngine::WireMock => {
-            let (mappings, notes) = wiremock_mappings(c);
+            let (mappings, coverage) = wiremock_mappings(c, spec);
             let mappings_dir = dir.join("mappings");
             std::fs::create_dir_all(&mappings_dir).map_err(|e| format!("{}: {e}", mappings_dir.display()))?;
             std::fs::create_dir_all(dir.join("__files")).ok();
             let text = serde_json::to_string_pretty(&mappings).map_err(|e| e.to_string())?;
             let file = mappings_dir.join("rivet.json");
             std::fs::write(&file, text).map_err(|e| format!("{}: {e}", file.display()))?;
-            Ok(notes)
+            Ok(coverage)
         }
     }
 }
@@ -354,9 +400,7 @@ pub struct MockRun {
     /// `http://127.0.0.1:<port>`.
     pub url: String,
     pub dir: PathBuf,
-    /// Requests the mock answers (those with examples).
-    pub answered: usize,
-    pub notes: Vec<String>,
+    pub coverage: MockCoverage,
 }
 
 fn http(method: super::types::Method, url: String, timeout_ms: u64) -> Result<u16, String> {
@@ -382,9 +426,16 @@ fn wait_healthy(engine: MockEngine, url: &str, timeout: std::time::Duration) -> 
 
 /// Starts collection `c`'s mock in Docker on `port`, serving files from `dir`.
 /// Blocking (the first start may pull the image): call off the UI thread.
-pub fn start(docker: &Path, settings: &MockSettings, c: &Collection, dir: &Path, port: u16) -> Result<MockRun, String> {
+pub fn start(
+    docker: &Path,
+    settings: &MockSettings,
+    c: &Collection,
+    spec: Option<&Spec>,
+    dir: &Path,
+    port: u16,
+) -> Result<MockRun, String> {
     let engine = settings.engine;
-    let notes = write_files(engine, c, dir)?;
+    let coverage = write_files(engine, c, spec, dir)?;
     let name = container_name(&c.id);
     // A container left over from a crash would hold the name.
     let _ = run(docker, &["rm".into(), "-f".into(), name.clone()], std::time::Duration::from_secs(20));
@@ -398,17 +449,17 @@ pub fn start(docker: &Path, settings: &MockSettings, c: &Collection, dir: &Path,
         let _ = run(docker, &["stop".into(), "-t".into(), "1".into(), name], std::time::Duration::from_secs(20));
         return Err(format!("{} не ответил на {url} за минуту", engine.label()));
     }
-    Ok(MockRun { engine, container: name, port, url, dir: dir.to_path_buf(), answered: answered_requests(c), notes })
+    Ok(MockRun { engine, container: name, port, url, dir: dir.to_path_buf(), coverage })
 }
 
 /// Rewrites the stubs of a running mock from `c` and reloads them (no restart).
-pub fn reload(running: &MockRun, c: &Collection) -> Result<MockRun, String> {
-    let notes = write_files(running.engine, c, &running.dir)?;
+pub fn reload(running: &MockRun, c: &Collection, spec: Option<&Spec>) -> Result<MockRun, String> {
+    let coverage = write_files(running.engine, c, spec, &running.dir)?;
     let status = http(super::types::Method::Post, format!("{}{}", running.url, running.engine.reload_path()), 5000)?;
     if !(200..300).contains(&status) {
         return Err(format!("{} ответил {status} на перезагрузку заглушек", running.engine.label()));
     }
-    Ok(MockRun { answered: answered_requests(c), notes, ..running.clone() })
+    Ok(MockRun { coverage, ..running.clone() })
 }
 
 /// Stops a mock (its container is removed: it was started with --rm).
@@ -448,10 +499,11 @@ mod tests {
         one.examples = vec![example("missing", 404, "{}")];
         let bare = RequestSpec::new("Bare", Method::Post, "{{baseUrl}}/orders");
         c.requests = vec![list, one, bare, RequestSpec::untitled_ws()];
-        let (doc, notes) = wiremock_mappings(&c);
+        let (doc, coverage) = wiremock_mappings(&c, None);
         let m = doc["mappings"].as_array().unwrap();
-        // List: name + code stubs for both examples, default for the first.
-        assert_eq!(m.len(), 2 + 2 + 1 + 2 + 1);
+        // List: name + code stubs for both examples, default for the first;
+        // One: 3; Bare: a 501 stub.
+        assert_eq!(m.len(), 2 + 2 + 1 + 2 + 1 + 1);
         assert_eq!(m[0]["request"], json!({"method": "GET", "urlPath": "/users", "headers": {"x-mock-response-name": {"equalTo": "ok"}}}));
         assert_eq!(m[0]["priority"], 1);
         assert_eq!(m[1]["request"]["headers"], json!({"x-mock-response-code": {"equalTo": "200"}}));
@@ -461,9 +513,37 @@ mod tests {
         let one = m.iter().find(|s| s["name"] == "One · missing" && s["priority"] == 5).unwrap();
         assert_eq!(one["request"]["urlPathPattern"], "/users/[^/]+/v1\\.0");
         assert_eq!(one["response"]["status"], 404);
-        assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("Bare"));
+        assert_eq!(coverage, MockCoverage { from_examples: 2, from_spec: 0, missing: vec!["Bare".into()] });
+        let bare = m.iter().find(|s| s["name"] == "Bare · нет примера").unwrap();
+        assert_eq!(bare["response"]["status"], 501);
+        assert_eq!(bare["priority"], 9);
+        assert!(bare["response"]["body"].as_str().unwrap().contains("нет сохранённого примера"));
         assert_eq!(answered_requests(&c), 2);
+    }
+
+    #[test]
+    fn requests_without_examples_answer_from_the_spec() {
+        let spec = Spec::parse(
+            "openapi: 3.0.3\ninfo: {title: T, version: '1'}\npaths:\n  /orders/{id}:\n    get:\n      responses:\n        '404': {description: no}\n        '200':\n          description: ok\n          content:\n            application/json:\n              example: {id: 7, state: paid}\n        default: {description: err}\n",
+        )
+        .unwrap();
+        let mut c = Collection::new("Spec");
+        let mut r = RequestSpec::new("Order", Method::Get, "{{baseUrl}}/orders/{{id}}");
+        r.spec_ref = Some(crate::core::types::SpecRef { method: Method::Get, path: "/orders/{id}".into() });
+        c.requests.push(r);
+        let (doc, coverage) = wiremock_mappings(&c, Some(&spec));
+        assert_eq!(coverage, MockCoverage { from_examples: 0, from_spec: 1, missing: vec![] });
+        let m = doc["mappings"].as_array().unwrap();
+        // 200 first (success), then 404; `default` skipped; default stub = 200.
+        let default = m.iter().find(|s| s["priority"] == 6).unwrap();
+        assert_eq!(default["response"]["status"], 200);
+        let body: Value = serde_json::from_str(default["response"]["body"].as_str().unwrap()).unwrap();
+        assert_eq!(body, json!({"id": 7, "state": "paid"}));
+        assert_eq!(default["request"]["urlPathPattern"], "/orders/[^/]+");
+        assert!(m.iter().any(|s| s["request"]["headers"]["x-mock-response-code"]["equalTo"] == "404"));
+        assert_eq!(m.len(), 3);
+        // Without the spec the same request has no answer.
+        assert_eq!(wiremock_mappings(&c, None).1.missing, vec!["Order".to_string()]);
     }
 
     #[test]
@@ -501,7 +581,7 @@ mod tests {
         let mut r = RequestSpec::new("A", Method::Get, "http://h/a");
         r.examples = vec![example("ok", 200, "hi")];
         c.requests.push(r);
-        write_files(MockEngine::WireMock, &c, &dir).unwrap();
+        write_files(MockEngine::WireMock, &c, None, &dir).unwrap();
         let text = std::fs::read_to_string(dir.join("mappings/rivet.json")).unwrap();
         assert!(text.contains("\"urlPath\": \"/a\""));
         std::fs::remove_dir_all(&dir).ok();

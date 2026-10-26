@@ -34,6 +34,12 @@ impl Workspace {
         base.join(collection_id)
     }
 
+    /// OpenAPI spec the collection's requests are linked to (answers requests
+    /// that have no saved examples).
+    fn mock_spec(&self, collection_id: &str) -> Option<std::sync::Arc<crate::core::openapi::Spec>> {
+        self.linked_specs.get(collection_id).cloned().or_else(|| self.spec.clone())
+    }
+
     fn mock_changed(&mut self, cx: &mut Context<Self>) {
         let mocks = self.mocks.clone();
         self.collection_panel.update(cx, |p, cx| p.set_mocks(mocks, cx));
@@ -60,6 +66,7 @@ impl Workspace {
             })
             .collect();
         let id = collection_id.to_string();
+        let spec = self.mock_spec(collection_id);
         self.mocks.insert(id.clone(), MockState::Starting);
         self.notify_user(format!("Запуск мока «{}»…", collection.name), cx);
         self.mock_changed(cx);
@@ -74,7 +81,7 @@ impl Workspace {
                 }
             };
             let port = mock::free_port(settings.port, &taken).ok_or("Нет свободного порта для мока")?;
-            mock::start(&docker, &settings, &collection, &dir, port)
+            mock::start(&docker, &settings, &collection, spec.as_deref(), &dir, port)
         });
         let task = cx.spawn(async move |this, cx| {
             let result = work.await;
@@ -88,11 +95,7 @@ impl Workspace {
                     .unwrap_or_default();
                 match result {
                     Ok(run) => {
-                        let mut text = format!("Мок «{name}» работает: {}", run.url);
-                        if !run.notes.is_empty() {
-                            text += &format!(" ({})", run.notes.join("; "));
-                        }
-                        this.notify_user(text, cx);
+                        this.notify_user(format!("Мок «{name}» работает: {}", run.url), cx);
                         this.mocks.insert(id.clone(), MockState::Running(run));
                     }
                     Err(e) => {
@@ -131,7 +134,8 @@ impl Workspace {
             return;
         };
         let id = collection_id.to_string();
-        let work = cx.background_spawn(async move { mock::reload(&run, &collection) });
+        let spec = self.mock_spec(collection_id);
+        let work = cx.background_spawn(async move { mock::reload(&run, &collection, spec.as_deref()) });
         cx.spawn(async move |this, cx| {
             let result = work.await;
             this.update(cx, |this, cx| {
