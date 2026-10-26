@@ -20,6 +20,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::core::openapi::GeneratedRequestBody;
+use crate::core::auto_headers::{self, AutoHeader};
 use crate::core::bulk;
 use crate::core::header_check::{self, HeaderIssue};
 use crate::core::schema_hover::{self, BodySide, FieldInfo, SchemaLink};
@@ -625,6 +626,8 @@ pub struct RequestEditor {
     field_hover: Option<FieldHover>,
     /// Params / Headers key cell under the pointer: (table, row).
     param_hover: Option<(KvTarget, usize)>,
+    /// Headers tab lists the auto-generated headers (Postman hides them by default).
+    show_auto_headers: bool,
     /// Live JSON check of the body: syntax error / schema warnings, in text order.
     body_problems: Vec<BodyProblem>,
     /// Schema mismatches behind the warnings (for the hover warn section).
@@ -863,6 +866,7 @@ impl RequestEditor {
             schema_link: None,
             field_hover: None,
             param_hover: None,
+            show_auto_headers: false,
             body_problems: Vec::new(),
             body_mismatches: Vec::new(),
             body_checked: false,
@@ -1807,6 +1811,28 @@ impl RequestEditor {
         }
     }
 
+    pub fn show_auto_headers(&self) -> bool {
+        self.show_auto_headers
+    }
+
+    /// "Показать / Скрыть авто-заголовки".
+    pub fn toggle_auto_headers(&mut self, cx: &mut Context<Self>) {
+        self.show_auto_headers = !self.show_auto_headers;
+        cx.notify();
+    }
+
+    /// Switches an auto-generated header off (kept in the list) or back on.
+    pub fn toggle_auto_header(&mut self, name: &str, cx: &mut Context<Self>) {
+        let Some(header) = auto_headers::auto_headers(&self.spec).into_iter().find(|h| h.name == name) else {
+            return;
+        };
+        if header.can_disable {
+            auto_headers::set_enabled(&mut self.spec, name, !header.enabled);
+            cx.emit(RequestEditorEvent::Changed);
+            cx.notify();
+        }
+    }
+
     fn delete_row(&mut self, target: KvTarget, ix: usize, cx: &mut Context<Self>) {
         if ix < target.list(&self.spec).len() {
             self.expanded = None;
@@ -2134,6 +2160,15 @@ impl RequestEditor {
                 .border_color(if i.is_error() { p.danger } else { p.warn }),
             None => d,
         };
+        // Auto-generated headers: built before `rows`, which borrows `cx` lazily.
+        let auto = (target == KvTarget::Headers).then(|| auto_headers::auto_headers(&self.spec));
+        let auto_bar = auto.as_ref().map(|list| self.auto_headers_bar(list.len(), cx));
+        let auto_rows: Vec<AnyElement> = match &auto {
+            Some(list) if self.show_auto_headers => {
+                list.iter().enumerate().map(|(ix, h)| self.auto_header_row(ix, h, cx)).collect()
+            }
+            _ => Vec::new(),
+        };
         let rows = self.rows(target).iter().enumerate().map(|(ix, row)| {
             let kv = list.get(ix);
             let (name_issue, value_issue) = if target == KvTarget::Headers && kv.is_some() {
@@ -2386,8 +2421,139 @@ impl RequestEditor {
                     d.flex_1().min_h_0().scroll_y(&self.scrolls.get(target.scope()))
                 }
             })
+            .children(auto_bar)
             .child(header)
+            .children(auto_rows)
             .children(rows)
+            .into_any_element()
+    }
+
+    /// The line above the Headers table: shows or hides the auto-generated rows.
+    fn auto_headers_bar(&self, count: usize, cx: &mut Context<Self>) -> AnyElement {
+        let p = *cx.palette();
+        let shown = self.show_auto_headers;
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(28.))
+            .px(px(14.))
+            .border_b_1()
+            .border_color(p.border)
+            .child(
+                div()
+                    .id("auto-headers-toggle")
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(6.))
+                    .py(px(2.))
+                    .rounded(px(4.))
+                    .text_size(px(11.5))
+                    .text_color(p.text_dim)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(p.surface_hi).text_color(p.text))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_auto_headers(cx)))
+                    .child(icon(if shown { IconName::EyeOff } else { IconName::Eye }, 12., p.text_dim))
+                    .child(if shown {
+                        "Скрыть авто-заголовки".to_string()
+                    } else {
+                        format!("Показать авто-заголовки ({count})")
+                    })
+                    .test_support(),
+            )
+            .into_any_element()
+    }
+
+    /// One auto-generated header: read-only name and value, a checkbox that
+    /// switches it off without deleting, and where it comes from.
+    fn auto_header_row(&self, ix: usize, h: &AutoHeader, cx: &mut Context<Self>) -> AnyElement {
+        let p = *cx.palette();
+        let name = h.name.clone();
+        let hint = if h.can_disable {
+            format!("{}. Добавляется автоматически; добавьте заголовок с тем же именем, чтобы заменить значение.", h.source)
+        } else {
+            format!("{}. Добавляется автоматически, выключить нельзя.", h.source)
+        };
+        let toggle = div()
+            .id(("auto-enabled", ix))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(16.))
+            .rounded(px(4.))
+            .border_1()
+            .map(|d| match (h.enabled, h.can_disable) {
+                (true, true) => d.bg(p.accent).border_color(p.accent).child(icon(IconName::Check, 11., white())),
+                (true, false) => d.bg(p.text_dim.opacity(0.4)).border_color(p.border).child(icon(IconName::Check, 11., white())),
+                _ => d.border_color(p.border),
+            })
+            .when(h.can_disable, |d| {
+                d.cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_auto_header(&name, cx)))
+            })
+            .test_support();
+        let text = |content: String| {
+            div()
+                .h(px(30.))
+                .flex()
+                .items_center()
+                .px(px(2.))
+                .font_family(MONO)
+                .text_size(px(12.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(content)
+        };
+        div()
+            .id(("auto-header", ix))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(14.))
+            .border_b_1()
+            .border_color(p.border.opacity(0.6))
+            .bg(p.surface.opacity(0.5))
+            .text_color(p.text_dim)
+            .child(toggle)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .flex_1()
+                    .min_w_0()
+                    .when(!h.enabled, |d| d.opacity(0.45))
+                    .child(text(h.name.clone()))
+                    .child(
+                        div()
+                            .id(("auto-info", ix))
+                            .flex_none()
+                            .child(icon(IconName::Info, 12., p.text_dim))
+                            .tooltip(Tooltip::new(hint).build()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_basis(relative(0.))
+                    .flex_grow(1.4)
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .when(!h.enabled, |d| d.opacity(0.45))
+                    .child(text(h.value.clone())),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(11.5))
+                    .when(!h.enabled, |d| d.opacity(0.45))
+                    .child(if h.enabled { h.source.to_string() } else { "Выключен — не отправляется".into() }),
+            )
+            .child(div().w(px(22.)).flex_none())
+            .test_support()
             .into_any_element()
     }
 

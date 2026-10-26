@@ -955,3 +955,55 @@ fn graphql_body_mode_edits_query_and_variables(cx: &mut TestAppContext) {
     });
     assert!(events.borrow().contains(&RequestEditorEvent::Changed));
 }
+
+#[gpui_kit::test]
+fn auto_generated_headers_show_and_switch_off(cx: &mut TestAppContext) {
+    let mut spec = sample();
+    spec.auth = Auth::Bearer { token: "{{token}}".into() };
+    spec.body = rivet::core::types::Body::json("{}");
+    let (view, window, events) = open(cx, spec);
+    window.update(|w, cx| {
+        w.click(("subtab", RequestEditorTab::Headers as usize), cx);
+        w.render_frame(cx);
+        // Hidden by default, as in Postman.
+        assert!(w.try_find(("auto-header", 0usize)).is_none());
+        w.click("auto-headers-toggle", cx);
+        w.render_frame(cx);
+        // Authorization (from Auth), Content-Type, Content-Length, Host,
+        // User-Agent, Accept-Encoding; the user's Accept replaces the auto one.
+        for ix in 0..6usize {
+            assert!(w.within("req-headers").try_find(("auto-header", ix)).is_some(), "row {ix}");
+        }
+        assert!(w.try_find(("auto-header", 6usize)).is_none());
+        // User headers stay editable below.
+        assert!(w.within("req-headers").try_find(("key", 0usize)).is_some());
+        // User-Agent off; Host can't be switched off.
+        w.within("req-headers").click(("auto-enabled", 4usize), cx);
+        w.within("req-headers").click(("auto-enabled", 3usize), cx);
+        w.render_frame(cx);
+    });
+    view.read_with(window, |v, _| {
+        assert!(v.show_auto_headers());
+        assert_eq!(v.spec().disabled_auto_headers, ["user-agent"]);
+        // Switched off, not deleted: still listed.
+        let ua = rivet::core::auto_headers::auto_headers(v.spec())
+            .into_iter()
+            .find(|h| h.name == "User-Agent")
+            .unwrap();
+        assert!(!ua.enabled);
+    });
+    assert!(events.borrow().iter().any(|e| matches!(e, RequestEditorEvent::Changed)));
+    window.update(|w, cx| {
+        // Authorization from the Auth tab can be switched off too, and back on.
+        w.within("req-headers").click(("auto-enabled", 0usize), cx);
+        w.render_frame(cx);
+    });
+    view.read_with(window, |v, _| assert_eq!(v.spec().disabled_auto_headers, ["user-agent", "authorization"]));
+    window.update(|w, cx| {
+        w.within("req-headers").click(("auto-enabled", 0usize), cx);
+        w.click("auto-headers-toggle", cx);
+        w.render_frame(cx);
+        assert!(w.try_find(("auto-header", 0usize)).is_none());
+    });
+    view.read_with(window, |v, _| assert_eq!(v.spec().disabled_auto_headers, ["user-agent"]));
+}
