@@ -11,7 +11,7 @@ use super::types::Collection;
 /// What [`import_file`] produced.
 pub struct ImportOutcome {
     pub collection: Collection,
-    /// "openapi", "postman" or "rivet".
+    /// "openapi", "postman", "rivet" or "har".
     pub format: &'static str,
     /// The parsed spec for OpenAPI imports (the collection is linked to the file).
     pub spec: Option<Spec>,
@@ -48,6 +48,14 @@ pub fn rivet_collection(doc: &serde_json::Value) -> Result<(Collection, Option<S
     Ok((collection, spec))
 }
 
+/// Collection name for a HAR file: its file name without `.har`.
+pub fn har_collection_name(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "HAR".into())
+}
+
 /// Imports a Rivet export, a Postman v2.x collection or an OpenAPI 3 / Swagger 2 file.
 pub fn import_file(path: &Path) -> Result<ImportOutcome, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -55,6 +63,10 @@ pub fn import_file(path: &Path) -> Result<ImportOutcome, String> {
     if let Some(doc) = doc.as_ref().filter(|d| export::is_rivet(d)) {
         let (collection, spec) = rivet_collection(doc)?;
         return Ok(ImportOutcome { collection, format: "rivet", spec, warnings: Vec::new() });
+    }
+    if let Some(doc) = doc.as_ref().filter(|d| super::har::is_har(d)) {
+        let (collection, warnings) = super::har::import(doc, &har_collection_name(path))?;
+        return Ok(ImportOutcome { collection, format: "har", spec: None, warnings });
     }
     let is_postman = doc.is_some_and(|doc| postman::is_postman(&doc));
     if is_postman {

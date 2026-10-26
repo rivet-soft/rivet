@@ -607,3 +607,16 @@ fn export_collection_writes_files_and_masks_inline_secrets() {
     assert_eq!(imported["format"], "rivet");
     assert_eq!(imported["request_count"], 2);
 }
+
+#[test]
+fn import_spec_reads_har() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = seed(dir.path(), "http://127.0.0.1:9");
+    let har = dir.path().join("trace.har");
+    std::fs::write(&har, r#"{"log":{"entries":[{"request":{"method":"GET","url":"https://h.test/a"},"response":{"status":200,"statusText":"OK","content":{"text":"hi"}}}]}}"#).unwrap();
+    let mut mcp = Mcp::start(&path);
+    let imported = mcp.ok("import_spec", json!({"path": har}));
+    assert_eq!(imported["format"], "har");
+    assert_eq!(imported["collection"], "trace");
+    assert_eq!(imported["request_count"], 1);
+}

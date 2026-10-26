@@ -1687,3 +1687,27 @@ fn request_timeout_override_applies_when_sending(cx: &mut TestAppContext) {
         other => panic!("{other:?}"),
     });
 }
+
+#[gpui_kit::test]
+fn har_files_import_as_collections(cx: &mut TestAppContext) {
+    let dir = std::env::temp_dir().join(format!("rivet-har-{}", rivet::core::new_id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("checkout.har");
+    std::fs::write(
+        &path,
+        r#"{"log":{"entries":[{"request":{"method":"POST","url":"https://shop.test/api/cart?x=1","headers":[{"name":"Content-Type","value":"application/json"}],"postData":{"mimeType":"application/json","text":"{\"sku\":7}"}},"response":{"status":201,"statusText":"Created","headers":[],"content":{"text":"{\"ok\":true}"}}}]}}"#,
+    )
+    .unwrap();
+    let (view, window) = open_with(cx, store::seed_project());
+    view.update_in(window, |v, window, cx| v.import_file(path.clone(), window, cx));
+    view.read_with(window, |v, _| {
+        let c = v.project.collections.last().unwrap();
+        assert_eq!(c.name, "checkout");
+        assert_eq!(c.requests[0].name, "POST /api/cart");
+        assert_eq!(c.requests[0].params, vec![KeyValue::new("x", "1")]);
+        assert_eq!(c.requests[0].examples[0].status, 201);
+        assert_eq!(v.active().unwrap().id, c.requests[0].id, "first request opens");
+        assert_eq!(v.notice.as_deref(), Some("Импортирован HAR «checkout»: 1 запросов"));
+    });
+    std::fs::remove_dir_all(&dir).ok();
+}

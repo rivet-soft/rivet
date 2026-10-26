@@ -269,7 +269,7 @@ pub fn definitions() -> Vec<Value> {
         tool(
             "import_spec",
             "Import spec",
-            "Import an OpenAPI 3 / Swagger 2 file (YAML or JSON) or a Postman v2.x collection into a new collection. OpenAPI collections stay linked to the file.",
+            "Import an OpenAPI 3 / Swagger 2 file (YAML or JSON), a Postman v2.x collection, a HAR capture (requests with recorded responses as examples) or a Rivet export into a new collection. OpenAPI collections stay linked to the file.",
             json!({"path": {"type": "string", "description": "Absolute path of the file to import"}}),
             &["path"],
             false,

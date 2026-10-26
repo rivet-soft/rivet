@@ -2316,7 +2316,7 @@ impl Workspace {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Импортировать OpenAPI, Swagger, Postman или Rivet".into()),
+            prompt: Some("Импортировать OpenAPI, Swagger, Postman, HAR или Rivet".into()),
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await {
@@ -2354,6 +2354,28 @@ impl Workspace {
                     }
                     self.schedule_save(cx);
                     self.notify_user(format!("Импортирована коллекция «{name}»: {count} запросов"), cx);
+                }
+                Err(e) => self.notify_user(e, cx),
+            }
+            return;
+        }
+        if let Some(doc) = doc.as_ref().filter(|d| crate::core::har::is_har(d)) {
+            let name = crate::core::import::har_collection_name(&path);
+            match crate::core::har::import(doc, &name) {
+                Ok((collection, warnings)) => {
+                    let count = collection.requests.len();
+                    let first = collection.requests.first().cloned();
+                    self.project.collections.push(collection);
+                    self.sync_collection_panel(window, cx);
+                    if let Some(request) = first {
+                        self.open_request(request, window, cx);
+                    }
+                    self.schedule_save(cx);
+                    let mut text = format!("Импортирован HAR «{name}»: {count} запросов");
+                    if !warnings.is_empty() {
+                        text += &format!(" ({})", warnings.join("; "));
+                    }
+                    self.notify_user(text, cx);
                 }
                 Err(e) => self.notify_user(e, cx),
             }
